@@ -58,7 +58,19 @@ body {
 }
 :root { --radius: 6px; --radius-lg: 10px; }   /* 新拟物大圆角收敛 */
 
-.app { background: var(--desk); }
+/* App 壳层改为纵向堆叠（覆盖旧 styles.css 为 Sidebar+main 设计的行向 flex）：
+   TopBar → 信任横幅 → Dock → StatusBar */
+.app {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  gap: 0;
+  background: var(--desk);
+}
+/* 会话管理左窗不参与行向收缩（宽度只由拖拽决定） */
+.dock-window[data-window-kind='sessions'] { flex-shrink: 0; }
+/* 最小化窗口隐藏层以 dock 为定位基准 */
+.dock { position: relative; }
 
 /* ── Dock 壳层 ─────────────────────────────────────────────── */
 .dock {
