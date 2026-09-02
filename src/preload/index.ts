@@ -14,7 +14,8 @@ import type {
   SessionMeta,
   SessionTreeNode,
   ToolInfo,
-  TreeSummaryResult
+  TreeSummaryResult,
+  UiEvent
 } from '@shared/types'
 
 const api: NavAgentApi = {
@@ -58,7 +59,16 @@ const api: NavAgentApi = {
   trustProjectOnce: (): Promise<void> => ipcRenderer.invoke('project:trustOnce'),
   exportSession: (id: string, format: 'jsonl' | 'html'): Promise<string | null> =>
     ipcRenderer.invoke('session:export', id, format),
-  importSession: (): Promise<string | null> => ipcRenderer.invoke('session:import')
+  importSession: (): Promise<string | null> => ipcRenderer.invoke('session:import'),
+  ptyCreate: (): Promise<string | null> => ipcRenderer.invoke('pty:create'),
+  ptyWrite: (id: string, data: string): Promise<void> => ipcRenderer.invoke('pty:write', id, data),
+  ptyResize: (id: string, cols: number, rows: number): Promise<void> => ipcRenderer.invoke('pty:resize', id, cols, rows),
+  ptyKill: (id: string): Promise<void> => ipcRenderer.invoke('pty:kill', id),
+  onUiEvent: (cb: (e: UiEvent) => void): (() => void) => {
+    const handler = (_e: IpcRendererEvent, event: UiEvent): void => cb(event)
+    ipcRenderer.on('navagent:uiEvent', handler)
+    return () => ipcRenderer.removeListener('navagent:uiEvent', handler)
+  }
 }
 
 contextBridge.exposeInMainWorld('navagent', api)

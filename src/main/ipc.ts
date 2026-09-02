@@ -2,12 +2,13 @@ import { BrowserWindow, dialog, ipcMain, app } from 'electron'
 import { copyFileSync } from 'node:fs'
 import { writeFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { AgentEvent, AgentMessage, ApiConfig, DirEntry, ImageContent, SessionTreeNode, TreeSummaryResult } from '@shared/types'
+import type { AgentEvent, AgentMessage, ApiConfig, DirEntry, ImageContent, SessionTreeNode, TreeSummaryResult, UiEvent } from '@shared/types'
 import type { Agent } from './agent/agent'
 import type { SessionStore } from './agent/session-store'
 import type { PermissionManager } from './permissions'
 import type { ExtensionCommand } from './extensions/types'
 import type { ToolInfo } from './tools/assemble'
+import type { TerminalService } from './terminal'
 import { createBranchSummaryMessage, findCommonAncestor } from './agent/branch'
 import { expandPrompt, scanPromptTemplates } from './prompts'
 import { renderSessionHtml } from './export-html'
@@ -21,6 +22,13 @@ const NOISE_DIRS = new Set(['node_modules', 'dist', 'out', '__pycache__'])
 export function emitAgentEvent(event: AgentEvent): void {
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send('agent:event', event)
+  }
+}
+
+/** UI 事件（PTY 等）独立通道，与 agent 事件流互不干扰 */
+export function emitUiEvent(event: UiEvent): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('navagent:uiEvent', event)
   }
 }
 
@@ -38,8 +46,10 @@ export function registerIpc(deps: {
   listToolInfos: () => ToolInfo[]
   /** 工作区 context files 缓存重建（启动/config:set/手动刷新） */
   refreshContextFiles: () => void
+  /** 终端服务（Terminal 窗口 PTY 后端；index.ts 注入） */
+  terminals: TerminalService
 }): void {
-  const { agent, store, permissions, summarizeBranch } = deps
+  const { agent, store, permissions, summarizeBranch, terminals } = deps
 
   ipcMain.handle('config:get', () => getConfig())
 
@@ -256,6 +266,20 @@ export function registerIpc(deps: {
     if (res.canceled || res.filePaths.length === 0) return null
     return resolveWithin(ws, res.filePaths[0]!) ? toRel(ws, res.filePaths[0]!) : null
   })
+
+  // ── 终端（PTY）：spawn 失败返回 null，其余操作失败静默（对"永不 throw"契约） ──
+
+  ipcMain.handle('pty:create', (): string | null =>
+    terminals.create(getConfig().workspacePath || app.getPath('home'), {
+      onData: (id, chunk) => emitUiEvent({ type: 'pty_data', id, chunk }),
+      onExit: (id, exitCode) => emitUiEvent({ type: 'pty_exit', id, exitCode })
+    })
+  )
+  ipcMain.handle('pty:write', (_e, id: string, data: string) => terminals.write(String(id), String(data ?? '')))
+  ipcMain.handle('pty:resize', (_e, id: string, cols: number, rows: number) =>
+    terminals.resize(String(id), Number(cols) || 80, Number(rows) || 24)
+  )
+  ipcMain.handle('pty:kill', (_e, id: string) => terminals.kill(String(id)))
 
   // ── 工具 / 扩展 / 命令 / 项目信任 ──────────────────────────
 

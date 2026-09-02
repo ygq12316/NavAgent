@@ -538,6 +538,18 @@ export class MockApi implements NavAgentApi {
     return null
   }
 
+  // ── 终端 PTY（演示模式降级：浏览器无 shell，ptyCreate 恒 null，UI 呈不可用态） ──
+
+  async ptyCreate(): Promise<string | null> {
+    return null
+  }
+  async ptyWrite(): Promise<void> {}
+  async ptyResize(): Promise<void> {}
+  async ptyKill(): Promise<void> {}
+  onUiEvent(): () => void {
+    return () => {}
+  }
+
   // ── 会话树（演示模式：线性节点，仅支持从最新节点续跑） ──────
 
   /** 每会话稳定节点 id（随 message_end 数量惰性补齐） */

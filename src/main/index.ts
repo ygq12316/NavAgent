@@ -9,6 +9,7 @@ import type { Tool } from './tools/registry'
 import { Agent } from './agent/agent'
 import { getConfig } from './config'
 import { emitAgentEvent, registerIpc } from './ipc'
+import { TerminalService } from './terminal'
 import { COMPACTION_SYSTEM } from './agent/context'
 import { extractFileOperations, formatFileOperations, serializeConversation } from './agent/compaction'
 import { BRANCH_SUMMARIZATION_PROMPT } from './agent/branch'
@@ -109,6 +110,9 @@ function summarizeBranchMessages(messages: AgentMessage[]): Promise<string> {
 app.whenReady().then(() => {
   const store = new SessionStore(app.getPath('userData'))
   const permissions = new PermissionManager(emitAgentEvent)
+  // 终端 PTY 服务：退出时统一回收，避免残留 shell 进程
+  const terminals = new TerminalService()
+  app.on('will-quit', () => terminals.killAll())
 
   // --json 模式：事件同时写到 stdout（无窗口时 emitAgentEvent 自然 no-op）
   const jsonModeEnabled = isJsonMode()
@@ -226,7 +230,8 @@ app.whenReady().then(() => {
     isTrusted,
     trustRuntime: (ws: string) => runtimeTrusted.add(ws),
     listToolInfos,
-    refreshContextFiles
+    refreshContextFiles,
+    terminals
   })
 
   if (jsonModeEnabled) {

@@ -114,6 +114,11 @@ export type AgentEvent =
   | { type: 'notice'; message: string }
   | { type: 'queue_update'; steering: number; followUp: number }
 
+/** UI 事件（非 agent 契约）：PTY 数据/退出。独立通道 navagent:uiEvent */
+export type UiEvent =
+  | { type: 'pty_data'; id: string; chunk: string }
+  | { type: 'pty_exit'; id: string; exitCode: number }
+
 export type PermissionDecision = 'approve' | 'deny' | 'always'
 
 export interface SessionMeta {
@@ -279,4 +284,11 @@ export interface NavAgentApi {
   exportSession(id: string, format: 'jsonl' | 'html'): Promise<string | null>
   /** 选择 JSONL 文件导入为新会话；返回新会话 id，取消返回 null */
   importSession(): Promise<string | null>
+  /** 新建终端（PTY）；失败返回 null（spawn 错误编码进返回值） */
+  ptyCreate(): Promise<string | null>
+  ptyWrite(id: string, data: string): Promise<void>
+  ptyResize(id: string, cols: number, rows: number): Promise<void>
+  ptyKill(id: string): Promise<void>
+  /** UI 事件订阅（PTY 等）；返回解绑函数 */
+  onUiEvent(cb: (e: UiEvent) => void): () => void
 }
