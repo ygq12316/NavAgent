@@ -1,0 +1,241 @@
+/* ── 窗口化 UI 主题层（spec 第 2 节）──────────────────────────
+   引入顺序在 styles.css 之后，同名规则按层叠覆盖新拟物。
+   令牌分双层：语义变量（组件只用这些）→ 主题值。 */
+:root {
+  --desk: #d2cfc8;
+  --win: #f6f5f2;
+  --content: #fbfaf8;
+  --bd: #c8c5be;
+  --wbd: #dddad4;
+  --inner: #e9e7e1;
+  --tx: #33312c;
+  --dim: rgba(51, 49, 44, 0.6);
+  --faint: rgba(51, 49, 44, 0.38);
+  --hov: rgba(51, 49, 44, 0.06);
+  --acc: #2383e2;
+  --ok: #0f7b6c;
+  --warn: #b58a2e;
+  --radius-win: 14px;
+  --gap: 8px;
+}
+[data-theme='dark'] {
+  --desk: #1d2126;
+  --win: #2a2f37;
+  --content: #23272e;
+  --bd: #3a404a;
+  --wbd: #343a43;
+  --inner: #31373f;
+  --tx: #d7dce6;
+  --dim: rgba(215, 220, 230, 0.62);
+  --faint: rgba(215, 220, 230, 0.38);
+  --hov: rgba(215, 220, 230, 0.07);
+  --acc: #7c93ff;
+  --ok: #5cba8c;
+  --warn: #d9a441;
+}
+
+/* 全局基调：正文色/桌面底随主题 */
+body {
+  background: var(--desk);
+  color: var(--tx);
+}
+
+/* ── 去新拟物：阴影体系全部压平，边框/底色接管层次 ───────────── */
+.raised, .sunken, .btn, .icon-btn, .model-badge, .thinking-select,
+.dropdown, .project-btn, .search, .composer-box, .session-entry .session-export {
+  background: var(--win);
+  box-shadow: none !important;
+  border: 1px solid var(--wbd);
+}
+.btn:hover:not(:disabled), .icon-btn:hover:not(:disabled) {
+  background: var(--hov);
+  color: var(--tx);
+  box-shadow: none !important;
+}
+.btn:active:not(:disabled), .icon-btn:active:not(:disabled), .btn.pressed {
+  box-shadow: none !important;
+  background: var(--inner);
+}
+:root { --radius: 6px; --radius-lg: 10px; }   /* 新拟物大圆角收敛 */
+
+.app { background: var(--desk); }
+
+/* ── Dock 壳层 ─────────────────────────────────────────────── */
+.dock {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  padding: var(--gap);
+  gap: var(--gap);
+  background: var(--desk);
+  overflow: hidden;
+}
+.dock-window {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--win);
+  border: 1px solid var(--bd);
+  border-radius: var(--radius-win);
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+[data-theme='dark'] .dock-window { box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4); }
+.dock-window.is-drop-target { outline: 1.5px dashed var(--acc); outline-offset: -3px; }
+.dock-window.is-drop-reject { outline: 1.5px dashed var(--warn); outline-offset: -3px; }
+
+.dock-window-header {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 0 12px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--wbd);
+  user-select: none;
+}
+.dock-window-header.grabbable { cursor: grab; }
+.dock-window-header.grabbable:active { cursor: grabbing; }
+.dock-window-title { font-size: 12px; font-weight: 600; color: var(--tx); flex: 1; white-space: nowrap; overflow: hidden; }
+.dock-window-sub { font-size: 10px; color: var(--faint); font-weight: 400; }
+.dock-window-badge { font-size: 9px; color: var(--faint); border: 1px solid var(--inner); border-radius: 99px; padding: 1px 6px; }
+.dock-window-actions { display: flex; gap: 2px; align-items: center; }
+.dock-window-actions .win-btn {
+  min-width: 22px; height: 20px; border-radius: 4px; border: none;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; color: var(--faint); background: transparent; padding: 0 4px;
+}
+.dock-window-actions .win-btn:hover { background: var(--hov); color: var(--tx); }
+.dock-window-actions .win-btn.open-btn { font-size: 10px; color: var(--dim); border: 1px solid var(--bd); border-radius: 4px; padding: 1px 7px; min-width: 0; }
+.dock-window-actions .win-btn.open-btn:hover { color: var(--acc); border-color: var(--acc); background: transparent; }
+.dock-window-body { flex: 1; min-height: 0; overflow: hidden; border-top: none; background: var(--content); display: flex; flex-direction: column; }
+
+/* 分割树 */
+.dock-split-row { display: flex; flex: 1; min-width: 0; min-height: 0; }
+.dock-split-col { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+.dock-splitter { flex: 0 0 7px; position: relative; z-index: 2; margin: 0 -3px; }
+.dock-splitter[data-dir='col'] { flex-basis: 7px; margin: -3px 0; }
+.dock-splitter::before {
+  content: ''; position: absolute; background: transparent; transition: background 0.12s;
+}
+.dock-splitter[data-dir='row']::before { left: 3px; top: 0; bottom: 0; width: 1px; }
+.dock-splitter[data-dir='col']::before { top: 3px; left: 0; right: 0; height: 1px; }
+.dock-splitter:hover::before, .dock-splitter.active::before { background: var(--acc); }
+.dock-splitter[data-dir='row']:hover::before, .dock-splitter[data-dir='row'].active::before { width: 2px; left: 2.5px; }
+.dock-splitter[data-dir='col']:hover::before, .dock-splitter[data-dir='col'].active::before { height: 2px; top: 2.5px; }
+.dock-splitter.rail-split::before { background: var(--acc); width: 2px; left: 2.5px; }
+
+/* 拖拽 ghost */
+.drag-ghost {
+  position: fixed; z-index: 99; pointer-events: none;
+  background: var(--win); border: 1px solid var(--bd); border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(15, 15, 15, 0.18);
+  font-size: 11.5px; color: var(--tx); padding: 3px 12px;
+}
+
+/* 左栏塌缩细条 */
+.rail-collapsed-bar {
+  flex: 0 0 40px; border: 1px solid var(--bd); border-radius: var(--radius-win);
+  background: var(--win); color: var(--dim); writing-mode: vertical-rl;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  font-size: 12px; cursor: pointer;
+}
+.rail-collapsed-bar:hover { color: var(--acc); }
+
+/* 最小化窗口隐藏层（保活挂载，不可见不参与布局） */
+.dock-hidden { position: absolute; width: 0; height: 0; overflow: hidden; visibility: hidden; }
+
+/* ── Files 窗口 ────────────────────────────────────────────── */
+.files-toolbar { display: flex; gap: 6px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--wbd); }
+.files-search {
+  flex: 1; display: flex; align-items: center; gap: 5px;
+  border: 1px solid var(--inner); border-radius: 6px; padding: 3px 8px;
+  color: var(--faint); font-size: 11.5px; background: var(--win);
+}
+.files-search input { flex: 1; border: none; outline: none; background: transparent; color: var(--tx); font-size: 11.5px; }
+.files-body { flex: 1; overflow: auto; padding: 4px 6px; user-select: none; }
+.files-row {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  padding: 3px 6px; border: none; border-radius: 4px; background: transparent;
+  font-size: 12px; color: var(--tx); text-align: left; cursor: pointer;
+}
+.files-row:hover { background: var(--hov); }
+.files-row .caret { width: 12px; color: var(--faint); font-size: 10px; }
+.files-row .name { color: var(--tx); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.files-row.is-file .name { color: var(--dim); }
+.files-row .copy-path { margin-left: auto; border: none; background: transparent; color: var(--faint); font-size: 10px; opacity: 0; cursor: pointer; padding: 1px 4px; }
+.files-row:hover .copy-path { opacity: 1; }
+.files-row .copy-path:hover { color: var(--acc); }
+.files-empty { padding: 16px; font-size: 11.5px; color: var(--faint); text-align: center; }
+
+/* ── File 内容窗口（CodeMirror 宿主 + 工具条）──────────────── */
+.file-toolbar { display: flex; gap: 6px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--wbd); flex-shrink: 0; }
+.file-toolbar .file-search-hint { flex: 1; font-size: 10.5px; color: var(--faint); }
+.file-toolbar button { border: none; background: transparent; color: var(--dim); font-size: 10.5px; padding: 2px 7px; border-radius: 4px; cursor: pointer; }
+.file-toolbar button:hover { background: var(--hov); color: var(--tx); }
+.file-toolbar button.save-dirty { color: var(--acc); font-weight: 600; }
+.file-banner { padding: 6px 12px; font-size: 11px; background: var(--inner); color: var(--warn); flex-shrink: 0; }
+.file-editor-host { flex: 1; min-height: 0; overflow: hidden; }
+.file-editor-host .cm-editor { height: 100%; font-size: 12.5px; }
+.file-editor-host .cm-editor.cm-focused { outline: none; }
+.file-editor-host .cm-gutters { background: var(--content); border-right: 1px solid var(--wbd); color: var(--faint); }
+.file-editor-host .cm-activeLine { background: var(--hov); }
+.file-editor-host .cm-panels { background: var(--win); color: var(--tx); }
+.file-dialog-mask { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.25); display: flex; align-items: center; justify-content: center; z-index: 10; }
+.file-dialog { background: var(--win); border: 1px solid var(--bd); border-radius: 10px; padding: 16px; max-width: 320px; box-shadow: 0 8px 28px rgba(0,0,0,.16); }
+.file-dialog h4 { margin: 0 0 6px; font-size: 13px; color: var(--tx); }
+.file-dialog p { margin: 0 0 12px; font-size: 11.5px; color: var(--dim); line-height: 1.6; }
+.file-dialog .row { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* ── Terminal 窗口 ─────────────────────────────────────────── */
+.term-tabs { display: flex; gap: 4px; padding: 6px 10px 0; border-bottom: 1px solid var(--wbd); flex-shrink: 0; }
+.term-tab {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; padding: 3px 9px; border: none; background: transparent;
+  color: var(--faint); border-radius: 6px 6px 0 0; cursor: pointer;
+}
+.term-tab.on { background: var(--hov); color: var(--tx); font-weight: 500; }
+.term-tab .tab-close { border: none; background: transparent; color: var(--faint); cursor: pointer; padding: 0 1px; font-size: 9px; }
+.term-tab .tab-close:hover { color: var(--warn); }
+.term-add { border: none; background: transparent; color: var(--dim); font-size: 13px; cursor: pointer; padding: 0 6px; }
+.term-add:hover { color: var(--acc); }
+.term-host { flex: 1; min-height: 0; padding: 4px; position: relative; }
+.term-pane { position: absolute; inset: 4px; }
+.term-pane.off { display: none; }
+.term-pane .xterm { height: 100%; }
+.term-notice { padding: 20px; font-size: 12px; color: var(--faint); text-align: center; }
+.term-notice button { margin-top: 10px; }
+
+/* ── Composer 信息条 ───────────────────────────────────────── */
+.composer-meta {
+  display: flex; align-items: center; gap: 5px;
+  border-top: 1px solid var(--wbd); margin-top: 6px; padding: 6px 8px 7px;
+  overflow: hidden;
+}
+.meta-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10.5px; color: var(--dim); padding: 2px 8px;
+  background: var(--inner); border: none; border-radius: 5px; cursor: pointer;
+  white-space: nowrap;
+}
+.meta-chip:hover { color: var(--acc); }
+.meta-chip.thinking-active { color: var(--acc); background: var(--hov); }
+.meta-chip.plain { cursor: default; }
+.meta-spacer { flex: 1; }
+.meta-ctx { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--dim); padding: 2px 6px; white-space: nowrap; }
+.meta-ctx.warn { color: var(--warn); }
+.meta-ctx .bar { width: 48px; height: 4px; border-radius: 99px; background: var(--inner); overflow: hidden; }
+.meta-ctx .bar i { display: block; height: 100%; border-radius: 99px; background: var(--acc); }
+.meta-ctx.warn .bar i { background: var(--warn); }
+
+/* ── ToolBlock 可点路径 ────────────────────────────────────── */
+.tool-args.clickable { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+.tool-args.clickable:hover { color: var(--acc); }
+
+/* ── TopBar 主题切换 / StatusBar ───────────────────────────── */
+.icon-btn.theme-btn { border: 1px solid var(--wbd); }
+.statusbar { background: var(--win); border-top: 1px solid var(--wbd); }
+
+/* ── 左栏内部容器（Task 3 DockRoot 的 rail 内容宿主）────────── */
+.dock-rail-inner { width: 100%; flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
