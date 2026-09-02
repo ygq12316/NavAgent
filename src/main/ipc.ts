@@ -13,6 +13,8 @@ import { expandPrompt, scanPromptTemplates } from './prompts'
 import { renderSessionHtml } from './export-html'
 import { getConfig, updateConfig } from './config'
 import { resolveWithin } from './tools/registry'
+import { readWorkspaceFile, writeWorkspaceFile, globWorkspace } from './fs-service'
+import { toRel } from './tools/walk'
 
 const NOISE_DIRS = new Set(['node_modules', 'dist', 'out', '__pycache__'])
 
@@ -232,6 +234,27 @@ export function registerIpc(deps: {
       .filter((en) => !en.name.startsWith('.') && !(en.isDirectory() && NOISE_DIRS.has(en.name)))
       .map((en) => ({ name: en.name, type: en.isDirectory() ? ('dir' as const) : ('file' as const) }))
       .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1))
+  })
+
+  // ── 工作区文件读写 / glob / 文件选择（File 窗口后端；失败编码进返回值） ──
+
+  ipcMain.handle('fs:read', (_e, rel: string) => readWorkspaceFile(getConfig().workspacePath, String(rel ?? '')))
+
+  ipcMain.handle('fs:write', (_e, rel: string, content: string, baseMtime?: number) =>
+    writeWorkspaceFile(getConfig().workspacePath, String(rel ?? ''), String(content ?? ''), typeof baseMtime === 'number' ? baseMtime : undefined)
+  )
+
+  ipcMain.handle('fs:glob', (_e, pattern: string) =>
+    typeof pattern === 'string' && pattern.trim() ? globWorkspace(getConfig().workspacePath, pattern.trim()) : []
+  )
+
+  // 系统文件选择器：选中工作区外文件时返回 null（不越界）
+  ipcMain.handle('file:pick', async (): Promise<string | null> => {
+    const ws = getConfig().workspacePath
+    if (!ws) return null
+    const res = await dialog.showOpenDialog({ defaultPath: ws, properties: ['openFile'] })
+    if (res.canceled || res.filePaths.length === 0) return null
+    return resolveWithin(ws, res.filePaths[0]!) ? toRel(ws, res.filePaths[0]!) : null
   })
 
   // ── 工具 / 扩展 / 命令 / 项目信任 ──────────────────────────

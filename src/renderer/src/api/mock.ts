@@ -4,6 +4,8 @@ import type {
   AgentMessage,
   ApiConfig,
   CommandInfo,
+  FileReadResult,
+  FileWriteResult,
   ImageContent,
   PermissionDecision,
   SessionMeta,
@@ -496,6 +498,44 @@ export class MockApi implements NavAgentApi {
 
   async listDir(path: string): Promise<{ name: string; type: 'file' | 'dir' }[]> {
     return TREES[this.currentProject]?.[path] ?? []
+  }
+
+  // ── 工作区文件读写 / glob / 选择（演示模式：内存态） ───────
+
+  /** 演示模式的内存文件系统（dev:web 下 File 窗口读写这里） */
+  private memFiles = new Map<string, { content: string; mtime: number }>()
+
+  async readFile(rel: string): Promise<FileReadResult> {
+    const hit = this.memFiles.get(rel)
+    if (!hit) return { ok: false, error: 'not-found', message: '（演示模式）文件不存在于内存态' }
+    return { ok: true, content: hit.content, mtime: hit.mtime, truncated: false }
+  }
+
+  async writeFile(rel: string, content: string, baseMtime?: number): Promise<FileWriteResult> {
+    const hit = this.memFiles.get(rel)
+    if (hit && baseMtime !== undefined && baseMtime !== hit.mtime) {
+      return { ok: false, error: 'conflict', message: '文件已被外部修改（演示模式冲突）' }
+    }
+    const mtime = Date.now()
+    this.memFiles.set(rel, { content, mtime })
+    return { ok: true, mtime }
+  }
+
+  async globFiles(pattern: string): Promise<string[]> {
+    // 简化 glob → 正则（对齐主进程语义的关键是 **/ 可选，根目录文件也能命中）
+    const body = pattern
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*\*\//g, '(?:.*/)?')
+      .replace(/\*\*/g, '.*')
+      .replace(/\*/g, '[^/]*')
+      .replace(/\?/g, '.')
+    const re = new RegExp('^(?:' + body + ')$', 'i')
+    return [...this.memFiles.keys()].filter((k) => re.test(k)).slice(0, 200)
+  }
+
+  async pickFile(): Promise<string | null> {
+    this.emit({ type: 'notice', message: '（演示模式）系统文件选择器仅桌面应用可用' })
+    return null
   }
 
   // ── 会话树（演示模式：线性节点，仅支持从最新节点续跑） ──────

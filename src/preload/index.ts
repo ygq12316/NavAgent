@@ -5,6 +5,8 @@ import type {
   ApiConfig,
   CommandInfo,
   DirEntry,
+  FileReadResult,
+  FileWriteResult,
   ImageContent,
   NavAgentApi,
   PermissionDecision,
@@ -36,6 +38,11 @@ const api: NavAgentApi = {
   switchSession: (id: string): Promise<void> => ipcRenderer.invoke('session:switch', id),
   deleteSession: (id: string): Promise<'ok' | 'busy' | 'not-found'> => ipcRenderer.invoke('session:delete', id),
   listDir: (path: string): Promise<DirEntry[]> => ipcRenderer.invoke('fs:listDir', path),
+  readFile: (rel: string): Promise<FileReadResult> => ipcRenderer.invoke('fs:read', rel),
+  writeFile: (rel: string, content: string, baseMtime?: number): Promise<FileWriteResult> =>
+    ipcRenderer.invoke('fs:write', rel, content, baseMtime),
+  globFiles: (pattern: string): Promise<string[]> => ipcRenderer.invoke('fs:glob', pattern),
+  pickFile: (): Promise<string | null> => ipcRenderer.invoke('file:pick'),
   listTree: (id: string): Promise<SessionTreeNode[]> => ipcRenderer.invoke('session:tree', id),
   switchLeaf: (id: string, nodeId: string, summarize: boolean): Promise<TreeSummaryResult> =>
     ipcRenderer.invoke('session:switchLeaf', id, nodeId, summarize),

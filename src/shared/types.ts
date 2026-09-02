@@ -212,6 +212,16 @@ export interface DirEntry {
   type: 'file' | 'dir'
 }
 
+/** 读工作区文件结果（fs-service；失败编码进返回值，永不 throw） */
+export type FileReadResult =
+  | { ok: true; content: string; mtime: number; truncated: boolean }
+  | { ok: false; error: 'outside-workspace' | 'not-found' | 'binary' | 'io'; message: string }
+
+/** 写工作区文件结果（baseMtime 冲突检测由 fs-service 判定） */
+export type FileWriteResult =
+  | { ok: true; mtime: number }
+  | { ok: false; error: 'conflict' | 'outside-workspace' | 'io'; message: string }
+
 /** preload 桥与 mock 共同实现的窄接口（设计方案 4.6） */
 export interface NavAgentApi {
   getConfig(): Promise<ApiConfig>
@@ -233,6 +243,14 @@ export interface NavAgentApi {
   /** 删除会话；当前会话运行中返回 busy（IPC 层保证），删除当前会话时自动切到列表第一个会话并重放 */
   deleteSession(id: string): Promise<'ok' | 'busy' | 'not-found'>
   listDir(path: string): Promise<DirEntry[]>
+  /** 读工作区文件（文本；>1MB 截断 truncated=true；二进制返回 error） */
+  readFile(rel: string): Promise<FileReadResult>
+  /** 写工作区文件；baseMtime 缺省 = 强制覆盖；外部已改返回 conflict */
+  writeFile(rel: string, content: string, baseMtime?: number): Promise<FileWriteResult>
+  /** 工作区内 glob 搜索，返回相对路径（≤200 条） */
+  globFiles(pattern: string): Promise<string[]>
+  /** 系统文件选择器（限工作区内文件），取消返回 null */
+  pickFile(): Promise<string | null>
   /** 当前会话的树节点列表 */
   listTree(id: string): Promise<SessionTreeNode[]>
   /** 切换活动叶子（跳转续跑/改写重发的基础）；summarize=为被离开路径生成分支摘要 */
