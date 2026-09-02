@@ -47,15 +47,23 @@
 
 ```ts
 // src/renderer/src/state/__tests__/layout.test.ts
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, beforeAll } from 'vitest'
 import {
   defaultLayout, layoutReducer, findPath, removeAt, insertNear, countLeaves,
-  validateLayout, RAIL_MIN, RAIL_MAX, RATIO_MIN, RATIO_MAX
+  validateLayout, loadLayout, saveLayout, RAIL_MIN, RAIL_MAX, RATIO_MIN, RATIO_MAX
 } from '../layout'
 import type { FreeNode } from '../layout'
 
-const leaf = (k: FreeNode extends never ? never : Parameters<typeof findPath>[1]) : never => null as never
-// ↑ 上一行不要；用下面的助手
+// vitest node 环境没有 localStorage，持久化用例需要先打桩
+beforeAll(() => {
+  const store = new Map<string, string>()
+  ;(globalThis as unknown as Record<string, unknown>).localStorage = {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => void store.set(k, v),
+    removeItem: (k: string) => void store.delete(k)
+  }
+})
+
 const L = (k: 'chat' | 'files' | 'file' | 'terminal'): FreeNode => ({ t: 'leaf', kind: k })
 const S = (dir: 'row' | 'col', ratio: number, a: FreeNode, b: FreeNode): FreeNode => ({ t: 'split', dir, ratio, a, b })
 
@@ -183,22 +191,6 @@ describe('layoutReducer', () => {
   })
 
   it('持久化往返：save 后 load 相同', () => {
-    const { saveLayout, loadLayout } = await0()
-    function await0() {
-      // 直接用内存 stub（测试环境无 localStorage 时跳过）
-      const store = new Map<string, string>()
-      const g: Record<string, unknown> = globalThis
-      g.localStorage = {
-        getItem: (k: string) => store.get(k) ?? null,
-        setItem: (k: string, v: string) => void store.set(k, v),
-        removeItem: (k: string) => void store.delete(k)
-      }
-      return { saveLayout: layoutMod().saveLayout, loadLayout: layoutMod().loadLayout }
-    }
-    function layoutMod() {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      return require('../layout') as typeof import('../layout')
-    }
     let s = layoutReducer(defaultLayout(), { kind: 'open', win: 'files' })
     s = layoutReducer(s, { kind: 'setTheme', theme: 'dark' })
     saveLayout(s)
@@ -443,8 +435,11 @@ export function layoutReducer(s: LayoutState, a: LayoutAction): LayoutState {
     }
     case 'setTheme':
       return { ...s, theme: a.theme }
-    case 'hydrate':
-      return a.state
+    case 'hydrate': {
+      // localStorage 来源不可信：先深校验，非法回落默认
+      const v = validateLayout(a.state)
+      return v ?? defaultLayout()
+    }
     case 'reset':
       return defaultLayout()
   }
