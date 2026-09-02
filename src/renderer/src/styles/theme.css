@@ -239,3 +239,7 @@ body {
 
 /* ── 左栏内部容器（Task 3 DockRoot 的 rail 内容宿主）────────── */
 .dock-rail-inner { width: 100%; flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+
+/* ── chat 窗口内滚动布局：Transcript 撑满剩余空间内部滚动，Composer 固定底部 ── */
+.dock-window-body > .transcript-wrap { flex: 1; min-height: 0; }
+.dock-window-body > .composer { flex-shrink: 0; }
