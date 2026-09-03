@@ -11,13 +11,13 @@ function ThinkingPanel({ block }: { block: ThinkingContent }) {
   if (block.redacted) {
     return (
       <div className="thinking-panel sunken">
-        <div className="thinking-summary">🔒 思考过程（模型加密，不可见）</div>
+        <div className="thinking-summary">思考过程（模型加密，不可见）</div>
       </div>
     )
   }
   return (
     <details className="thinking-panel sunken">
-      <summary className="thinking-summary">💭 思考过程（{block.thinking.length} 字）</summary>
+      <summary className="thinking-summary">思考过程（{block.thinking.length} 字）</summary>
       <div className="thinking-body mono">{block.thinking}</div>
     </details>
   )
@@ -110,7 +110,7 @@ export function Transcript({ state, onChip, permission, onRespond, onOpenPath }:
             </div>
           ))
         )}
-        {state.retryHint && <div className="retry-row mono">⏳ {state.retryHint}</div>}
+        {state.retryHint && <div className="retry-row mono">{state.retryHint}</div>}
         {state.notice && <div className="notice-row mono">{state.notice}</div>}
         {permission && <PermissionPrompt permission={permission} onRespond={onRespond} />}
       </div>

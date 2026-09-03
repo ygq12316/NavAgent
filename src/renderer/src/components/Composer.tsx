@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import type { ImageContent, ThinkingLevel } from '@shared/types'
+import { IconPaperclip } from './icons'
 
 const MAX_IMAGES = 8
 const MAX_SIZE = 4 * 1024 * 1024
@@ -99,7 +100,7 @@ export function Composer({ draft, setDraft, working, onSend, onFollowUp, onCance
       )}
       <div className="composer-box raised">
         <button className="paperclip-btn" onClick={() => fileRef.current?.click()} title="添加图片（png/jpeg/webp/gif，≤4MB）">
-          📎
+          <IconPaperclip size={15} />
         </button>
         <input
           ref={fileRef}
@@ -155,10 +156,10 @@ export function Composer({ draft, setDraft, working, onSend, onFollowUp, onCance
             onChange={(e) => onSetThinking(e.target.value as ThinkingLevel)}
             title="思考深度（thinking level）"
           >
-            <option value="">🧠 默认</option>
+            <option value="">思考：默认</option>
             {(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as ThinkingLevel[]).map((l) => (
               <option key={l} value={l}>
-                🧠 {l}
+                思考：{l}
               </option>
             ))}
           </select>

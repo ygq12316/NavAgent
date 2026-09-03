@@ -1,6 +1,7 @@
 import type { Usage } from '@shared/types'
 import { contextTokensOf } from '@shared/types'
 import type { SessionStats } from '../state/reducer'
+import { IconPanelLeft } from './icons'
 
 interface Props {
   /** 会话管理左栏是否塌缩（☰ 切换） */
@@ -30,11 +31,11 @@ export function StatusBar({ railCollapsed, onToggleRail, model, usage, working, 
   return (
     <footer className="statusbar">
       <button className="icon-btn raised small" onClick={onToggleRail} title={railCollapsed ? '展开会话管理' : '折叠会话管理'}>
-        ☰
+        <IconPanelLeft size={14} />
       </button>
-      <span className="status-item">{model}</span>
-      {pct != null && <span className="status-item">上下文 {pct}%</span>}
-      {tok && <span className="status-item">{tok}</span>}
+      <span className="status-item mono">{model}</span>
+      {pct != null && <span className="status-item mono">上下文 {pct}%</span>}
+      {tok && <span className="status-item mono">{tok}</span>}
       {totalTok && stats && (
         <button className="status-item status-link" onClick={onOpenStats} title="会话累计统计（点击查看明细）">
           累计 {totalTok}

@@ -18,7 +18,7 @@ const PATH_TOOLS = new Set(['read_file', 'edit_file', 'write_file'])
 
 const STATUS_ICON: Record<ToolVM['status'], string> = {
   streaming: '⠙',
-  awaiting_approval: '⏳',
+  awaiting_approval: '…',
   running: '⠙',
   ok: '✓',
   error: '✗',

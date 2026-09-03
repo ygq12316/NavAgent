@@ -6,6 +6,7 @@ import { EditorView, keymap } from '@codemirror/view'
 import { basicSetup } from 'codemirror'
 import type { FileReadResult } from '@shared/types'
 import { getApi } from '../api'
+import { IconCopy } from './icons'
 import { MiniDialog } from './dock/WindowFrame'
 
 interface Props {
@@ -152,14 +153,14 @@ export function FileWindow({ path, reloadKey, onDirtyChange }: Props) {
   return (
     <>
       <div className="file-toolbar">
-        <span className="file-search-hint" title="CodeMirror 内建查找">⌕ Ctrl+F 文件内查找 · Mod+S 保存</span>
-        <button onClick={copyAll} title="复制全文">⧉ 复制</button>
+        <span className="file-search-hint" title="CodeMirror 内建查找">Ctrl+F 文件内查找 · Mod+S 保存</span>
+        <button onClick={copyAll} title="复制全文"><IconCopy size={12} /> 复制</button>
         <button
           className={dirty ? 'save-dirty' : ''}
           onClick={() => void save()}
           title={dirty ? '保存（有未保存修改）' : '已保存'}
         >
-          {dirty ? '● 保存' : '💾 已保存'}
+          {dirty ? '● 未保存 · Ctrl+S' : '已保存'}
         </button>
       </div>
       {banner && <div className="file-banner">{banner}</div>}

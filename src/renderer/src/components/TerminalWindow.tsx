@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { getApi } from '../api'
+import { IconPlus } from './icons'
 
 interface Tab {
   id: string
@@ -108,7 +109,7 @@ export function TerminalWindow() {
           </div>
         ))}
         <button className="term-add" onClick={() => void spawn()} title="新建终端">
-          ＋
+          <IconPlus size={13} />
         </button>
       </div>
       <div className="term-host">

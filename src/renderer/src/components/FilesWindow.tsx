@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { getApi } from '../api'
 import type { DirEntry } from '../api/types'
+import { IconChevronDown, IconChevronRight, IconCopy, IconRefresh, IconSearch } from './icons'
 
 interface Props {
   workspacePath: string
@@ -78,10 +79,10 @@ export function FilesWindow({ workspacePath, onOpenFile }: Props) {
         return (
           <div key={full}>
             <div className="files-row" style={{ paddingLeft: 4 + depth * 14 }} onClick={() => toggleDir(full)}>
-              <span className="caret">{open ? '▾' : '▸'}</span>
+              <span className="caret">{open ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}</span>
               <span className="name">{entry.name}</span>
               <button className="copy-path" title="复制路径" onClick={(e) => { e.stopPropagation(); copyPath(full) }}>
-                {copied === full ? '✓' : '⧉'}
+                {copied === full ? '✓' : <IconCopy size={12} />}
               </button>
             </div>
             {open && renderDir(full, depth + 1)}
@@ -93,7 +94,7 @@ export function FilesWindow({ workspacePath, onOpenFile }: Props) {
           <span className="caret" />
           <span className="name">{entry.name}</span>
           <button className="copy-path" title="复制路径" onClick={(e) => { e.stopPropagation(); copyPath(full) }}>
-            {copied === full ? '✓' : '⧉'}
+            {copied === full ? '✓' : <IconCopy size={12} />}
           </button>
         </div>
       )
@@ -110,7 +111,7 @@ export function FilesWindow({ workspacePath, onOpenFile }: Props) {
               <span className="caret" />
               <span className="name mono">{h}</span>
               <button className="copy-path" title="复制路径" onClick={(e) => { e.stopPropagation(); copyPath(h) }}>
-                {copied === h ? '✓' : '⧉'}
+                {copied === h ? '✓' : <IconCopy size={12} />}
               </button>
             </div>
           ))}
@@ -124,7 +125,7 @@ export function FilesWindow({ workspacePath, onOpenFile }: Props) {
     <>
       <div className="files-toolbar">
         <div className="files-search">
-          <span>⌕</span>
+          <IconSearch size={13} />
           <input
             value={query}
             onChange={(e) => onQuery(e.target.value)}
@@ -147,7 +148,7 @@ export function FilesWindow({ workspacePath, onOpenFile }: Props) {
             loadDir('')
           }}
         >
-          ⟳
+          <IconRefresh size={13} />
         </button>
       </div>
       {hitsView ?? (

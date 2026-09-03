@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ApiConfig, ThinkingLevel } from '@shared/types'
 import { findPreset } from '@shared/providers'
+import { IconFolder, IconGear, IconMoon, IconSun } from './icons'
 
 interface Props {
   config: ApiConfig
@@ -35,7 +36,7 @@ export function TopBar({ config, working, theme, onToggleTheme, onSwitchProject,
     <header className="topbar">
       <div className="project-select" ref={ref}>
         <button className="project-btn raised" disabled={working} onClick={() => setOpen((v) => !v)}>
-          <span>📁</span>
+          <IconFolder size={14} />
           <span className="project-name" title={config.workspacePath}>
             {baseName(config.workspacePath)}
           </span>
@@ -53,7 +54,7 @@ export function TopBar({ config, working, theme, onToggleTheme, onSwitchProject,
                 }}
                 title={p}
               >
-                <span>📁</span>
+                <IconFolder size={13} />
                 <span className="dropdown-name">{baseName(p)}</span>
                 <span className="dropdown-path">{p}</span>
               </button>
@@ -73,7 +74,7 @@ export function TopBar({ config, working, theme, onToggleTheme, onSwitchProject,
       </div>
       <div className="topbar-right">
         <button className="icon-btn theme-btn" onClick={onToggleTheme} title={theme === 'light' ? '切换暗色' : '切换明亮'}>
-          {theme === 'light' ? '☾' : '☀'}
+          {theme === 'light' ? <IconMoon size={14} /> : <IconSun size={14} />}
         </button>
         <select
           className="thinking-select sunken"
@@ -93,7 +94,7 @@ export function TopBar({ config, working, theme, onToggleTheme, onSwitchProject,
           {config.model}
         </button>
         <button className="icon-btn raised" onClick={onOpenSettings} title="设置">
-          ⚙
+          <IconGear size={14} />
         </button>
       </div>
     </header>

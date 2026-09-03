@@ -19,7 +19,7 @@ interface Props {
 const ROLE_ICON: Record<SessionTreeNode['role'], string> = {
   user: '❯',
   assistant: '◆',
-  tool_result: '⚙',
+  tool_result: '◇',
   snapshot: '📜'
 }
 

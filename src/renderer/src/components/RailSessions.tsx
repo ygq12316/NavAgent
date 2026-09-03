@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { SessionMeta } from '@shared/types'
+import { IconBranch, IconDownload, IconSearch, IconTrash } from './icons'
 
 // 会话按时间分组标签（自 Sidebar.tsx 原样迁移）
 function groupLabel(ts: number): string {
@@ -49,11 +50,11 @@ export function RailSessions(p: Props) {
     <>
       <button className="btn btn-primary new-chat" disabled={p.working} onClick={p.onNew}>＋ 新建对话</button>
       <div className="search sunken">
-        <span className="search-icon">🔍</span>
+        <span className="search-icon"><IconSearch size={13} /></span>
         <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索会话" />
       </div>
       <button className="btn btn-ghost branch-entry" disabled={p.working || !p.currentSessionId} onClick={p.onOpenTree} title="浏览当前会话的分支树">
-        ⑂ 分支树
+        <IconBranch size={13} /> 分支树
       </button>
       <div className="session-head">
         <span className="session-group-label">会话</span>
@@ -75,7 +76,7 @@ export function RailSessions(p: Props) {
                   <span className="session-title">{s.title}</span>
                   <span className="session-time">{relTime(s.updatedAt)}</span>
                 </button>
-                <button className="icon-btn raised small session-export" disabled={p.working} onClick={() => p.onExport(s.id)} title="导出">⇩</button>
+                <button className="icon-btn raised small session-export" disabled={p.working} onClick={() => p.onExport(s.id)} title="导出"><IconDownload size={13} /></button>
                 <button
                   className="icon-btn raised small session-export"
                   disabled={p.working}
@@ -84,7 +85,7 @@ export function RailSessions(p: Props) {
                   }}
                   title="删除会话"
                 >
-                  🗑
+                  <IconTrash size={13} />
                 </button>
               </div>
             ))}
