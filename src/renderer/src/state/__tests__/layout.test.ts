@@ -51,17 +51,45 @@ describe('findPath / removeAt / insertNear', () => {
 })
 
 describe('layoutReducer', () => {
-  it('open：files 插到 chat 左、file 插到右、terminal 插到下', () => {
+  it('open：任意顺序开满三窗都收敛到方案 A 规范树', () => {
+    // Files 满高窄列 │ 聊天横跨上部 │ 底行 File│Terminal
+    const planA = S('row', 0.22, L('files'), S('col', 0.62, L('chat'), S('row', 0.5, L('file'), L('terminal'))))
     let s = defaultLayout()
-    s = layoutReducer(s, { kind: 'open', win: 'files' })
-    expect(s.free).toEqual(S('row', 0.5, L('files'), L('chat')))
+    for (const w of ['files', 'file', 'terminal'] as const) s = layoutReducer(s, { kind: 'open', win: w })
+    expect(s.free).toEqual(planA)
+    let s2 = defaultLayout()
+    for (const w of ['terminal', 'file', 'files'] as const) s2 = layoutReducer(s2, { kind: 'open', win: w })
+    expect(s2.free).toEqual(planA)
+    let s3 = defaultLayout()
+    for (const w of ['file', 'terminal', 'files'] as const) s3 = layoutReducer(s3, { kind: 'open', win: w })
+    expect(s3.free).toEqual(planA)
+    // openKinds 顺序跟随插入序，这里只断言集合一致
+    expect([...s3.openKinds].sort()).toEqual(['chat', 'file', 'files', 'terminal'].sort())
+  })
+
+  it('open 单窗/两窗的规范中间态', () => {
+    let s = layoutReducer(defaultLayout(), { kind: 'open', win: 'files' })
+    expect(s.free).toEqual(S('row', 0.22, L('files'), L('chat')))
     s = layoutReducer(s, { kind: 'open', win: 'file' })
+    // 方案 A 中 File 属底行（聊天下方左位）：无 terminal 时独占底行
+    expect(s.free).toEqual(S('row', 0.22, L('files'), S('col', 0.62, L('chat'), L('file'))))
+  })
+
+  it('open 比例继承：用户拖过的分界在重排后保留', () => {
+    let s = layoutReducer(defaultLayout(), { kind: 'open', win: 'files' })
+    s = layoutReducer(s, { kind: 'setRatio', path: [], ratio: 0.3 }) // files│chat 边界
     s = layoutReducer(s, { kind: 'open', win: 'terminal' })
-    // 默认槽相对 chat 叶子：files 左 / file 右 / terminal 下（spec 第 2/4 节）
-    expect(findPath(s.free!, 'files')).toEqual([0])
-    expect(findPath(s.free!, 'file')).toEqual([1, 1])
-    expect(findPath(s.free!, 'terminal')).toEqual([1, 0, 1])
-    expect(s.openKinds).toContain('files')
+    // 重排后根分界（a 侧仍为 files）继承 0.3，聊天│底行用规范默认 0.62
+    expect(s.free).toEqual(S('row', 0.3, L('files'), S('col', 0.62, L('chat'), L('terminal'))))
+  })
+
+  it('close：从方案 A 满编摘窗仍有序补位', () => {
+    let s = defaultLayout()
+    for (const w of ['files', 'file', 'terminal'] as const) s = layoutReducer(s, { kind: 'open', win: w })
+    s = layoutReducer(s, { kind: 'close', win: 'file' })
+    expect(s.free).toEqual(S('row', 0.22, L('files'), S('col', 0.62, L('chat'), L('terminal'))))
+    s = layoutReducer(s, { kind: 'close', win: 'files' })
+    expect(s.free).toEqual(S('col', 0.62, L('chat'), L('terminal')))
   })
 
   it('open 已存在的窗口是 no-op', () => {

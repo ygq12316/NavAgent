@@ -156,19 +156,56 @@ export type LayoutAction =
   | { kind: 'hydrate'; state: LayoutState }
   | { kind: 'reset' }
 
-const DEFAULT_SLOT: Record<'files' | 'file' | 'terminal', { dir: 'row' | 'col'; first: boolean }> = {
-  files: { dir: 'row', first: true },   // chat 左
-  file: { dir: 'row', first: false },   // chat 右
-  terminal: { dir: 'col', first: false } // chat 下
+// ── 方案 A 规范树 ──────────────────────────────────────────
+/** 规范构图（用户选定方案 A）：Files 满高窄列 │ 聊天横跨上部 │ 底行 File+Terminal。
+ *  open 时按当前可见窗口集合重建规范树，保证任意开窗顺序收敛到同一结构；
+ *  用户拖拽出的分界比例按「a 侧子树 kind 集合」继承保留。 */
+const R_FILES = 0.22   // Files 列宽占比
+const R_CHAT = 0.62    // 聊天（上部）高度占比
+const R_BOTTOM = 0.5   // 底行 File│Terminal 左右占比
+
+const leafOf = (kind: FreeKind): FreeNode => ({ t: 'leaf', kind })
+
+/** 提取旧树的比例表：key = a 侧子树的 kind 集合（排序去重），value = ratio */
+export function ratioMapOf(node: FreeNode | null): Map<string, number> {
+  const map = new Map<string, number>()
+  const kindsOf = (n: FreeNode): FreeKind[] => (n.t === 'leaf' ? [n.kind] : [...kindsOf(n.a), ...kindsOf(n.b)])
+  const walk = (n: FreeNode | null): void => {
+    if (!n || n.t === 'leaf') return
+    const key = [...new Set(kindsOf(n.a))].sort().join(',')
+    if (!map.has(key)) map.set(key, n.ratio)
+    walk(n.a)
+    walk(n.b)
+  }
+  walk(node)
+  return map
 }
 
-/** chat 在树中：插到 chat 旁；chat 被最小化：包裹根；空树：单叶 */
-function openIn(free: FreeNode | null, win: FreeKind, dir: 'row' | 'col', first: boolean): FreeNode {
-  if (free === null) return { t: 'leaf', kind: win }
-  if (findPath(free, win)) return free
-  if (findPath(free, 'chat')) return insertNear(free, 'chat', dir, first, win)
-  const fresh: FreeNode = { t: 'leaf', kind: win }
-  return { t: 'split', dir, ratio: 0.5, a: first ? fresh : free, b: first ? free : fresh }
+function rowOfKinds(kinds: FreeKind[], ratios: Map<string, number>): FreeNode {
+  if (kinds.length === 1) return leafOf(kinds[0]!)
+  const [a, ...rest] = kinds
+  return { t: 'split', dir: 'row', ratio: ratios.get(a!) ?? R_BOTTOM, a: leafOf(a!), b: rowOfKinds(rest, ratios) }
+}
+
+/** 规范树构建（visible 至少含一个窗口） */
+export function canonicalTree(visible: FreeKind[], ratios: Map<string, number>): FreeNode {
+  const has = (k: FreeKind): boolean => visible.includes(k)
+  const bottom = (['file', 'terminal'] as FreeKind[]).filter(has)
+  let core: FreeNode
+  if (has('chat') && bottom.length > 0) {
+    // 聊天横跨上部，底行 File│Terminal
+    core = { t: 'split', dir: 'col', ratio: ratios.get('chat') ?? R_CHAT, a: leafOf('chat'), b: rowOfKinds(bottom, ratios) }
+  } else if (has('chat')) {
+    core = leafOf('chat')
+  } else if (bottom.length > 0) {
+    core = rowOfKinds(bottom, ratios) // chat 最小化时：剩余窗口纵向主体
+  } else {
+    core = leafOf('files') // 不可达（open 前保证 visible 非空），防御分支
+  }
+  if (has('files')) {
+    core = { t: 'split', dir: 'row', ratio: ratios.get('files') ?? R_FILES, a: leafOf('files'), b: core }
+  }
+  return core
 }
 
 export function layoutReducer(s: LayoutState, a: LayoutAction): LayoutState {
@@ -178,9 +215,19 @@ export function layoutReducer(s: LayoutState, a: LayoutAction): LayoutState {
     case 'toggleRail':
       return { ...s, railCollapsed: !s.railCollapsed }
     case 'open': {
-      const { dir, first } = DEFAULT_SLOT[a.win]
-      const free = openIn(s.free, a.win, dir, first)
-      if (free === s.free) return s
+      if (findPath(s.free, a.win)) return s // 已可见：no-op（单例）
+      const visible: FreeKind[] = []
+      const collect = (n: FreeNode | null): void => {
+        if (!n) return
+        if (n.t === 'leaf') visible.push(n.kind)
+        else {
+          collect(n.a)
+          collect(n.b)
+        }
+      }
+      collect(s.free)
+      // 最小化恢复与首开同路：重排为方案 A 规范树（含新窗），并继承已拖出的比例
+      const free = canonicalTree([...visible, a.win], ratioMapOf(s.free))
       return { ...s, free, openKinds: s.openKinds.includes(a.win) ? s.openKinds : [...s.openKinds, a.win] }
     }
     case 'close': {
