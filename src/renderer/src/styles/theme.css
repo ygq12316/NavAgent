@@ -16,7 +16,7 @@
   --ok: #0f7b6c;
   --warn: #b58a2e;
   --radius-win: 14px;
-  --gap: 8px;
+  --gap: 10px;   /* 有序拼贴：统一间距（dock 内边距与窗口间隙同值） */
 }
 [data-theme='dark'] {
   --desk: #1d2126;
