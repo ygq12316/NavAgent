@@ -126,6 +126,9 @@ body {
 /* 分割树 */
 .dock-split-row { display: flex; flex: 1; min-width: 0; min-height: 0; }
 .dock-split-col { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+/* 分割容器的孩子必须撑满容器：窗口/嵌套 split 都 flex:1（否则窗口高度塌缩成内容高，画布出现空白） */
+.dock-split-child { display: flex; min-width: 0; min-height: 0; }
+.dock-split-child > * { flex: 1; min-width: 0; min-height: 0; }
 .dock-splitter { flex: 0 0 7px; position: relative; z-index: 2; margin: 0 -3px; }
 .dock-splitter[data-dir='col'] { flex-basis: 7px; margin: -3px 0; }
 .dock-splitter::before {
