@@ -19,3 +19,8 @@ docs/
 .playwright-mcp/
 # 截图类临时产物不进根目录
 /*.png
+
+# 本地开发辅助（不入库）
+.claude/
+/tools/
+examples/session-graph/panel/test.html
