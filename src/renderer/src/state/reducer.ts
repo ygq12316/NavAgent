@@ -1,5 +1,28 @@
-import type { AgentEvent, AgentMessage, ImageContent, StopReason, TextContent, ThinkingContent, Usage } from '@shared/types'
+import type {
+  AgentEvent,
+  AgentMessage,
+  DiffSummary,
+  ImageContent,
+  SessionLoadResult,
+  SessionMeta,
+  StopReason,
+  TextContent,
+  ThinkingContent,
+  Usage
+} from '@shared/types'
 import { estimateCost, lookupModel } from '@shared/model-catalog'
+import {
+  closePane,
+  defaultPaneLayout,
+  findPath,
+  insertNear,
+  openPane,
+  removeAt,
+  setRatioAt,
+  swapKinds,
+  type PaneKind,
+  type PaneNode
+} from './pane-layout'
 
 /** 会话累计统计（message_end 时累加；reset 清零；成本未知 = null） */
 export interface SessionStats {
@@ -25,7 +48,8 @@ export interface ToolVM {
 }
 
 export type Block =
-  | { kind: 'user'; text: string; images?: ImageContent[] }
+  | { kind: 'user'; text: string; images?: ImageContent[]; nodeId?: string }
+  | { kind: 'injected'; rel: string; nodeId?: string }
   | {
       kind: 'assistant'
       blocks: (TextContent | ThinkingContent)[]
@@ -33,6 +57,8 @@ export type Block =
       stopReason: StopReason
       errorMessage?: string
       streaming: boolean
+      /** 所属会话树节点（rewind/fork 定位用；store 落盘时打标） */
+      nodeId?: string
     }
 
 export interface TurnVM {
@@ -47,6 +73,7 @@ export interface PermissionVM {
   detail: string
 }
 
+/** 单会话视图状态（事件流的增量累积结果；一桶一会话） */
 export interface UIState {
   turns: TurnVM[]
   working: boolean
@@ -58,11 +85,22 @@ export interface UIState {
   notice: string | null
   /** 排队中的插话/续跑条数（queue_update 事件驱动） */
   queued: { steering: number; followUp: number }
-  /** 会话累计 token/成本（挂 message_end，session 重放后自动恢复） */
+  /** 会话累计 token/成本（挂 message_end，hydrate 后自动恢复） */
   stats: SessionStats
+  /** 扩展弹窗（ctx.ui 挂起-应答；单槽，同 permission 先例） */
+  uiDialog: UiDialogVM | null
 }
 
-export const initialState: UIState = {
+export interface UiDialogVM {
+  requestId: string
+  kind: 'confirm' | 'input' | 'select'
+  title: string
+  message?: string
+  placeholder?: string
+  options?: string[]
+}
+
+export const initialSessionState: UIState = {
   turns: [],
   working: false,
   permission: null,
@@ -72,13 +110,72 @@ export const initialState: UIState = {
   retryHint: null,
   notice: null,
   queued: { steering: 0, followUp: 0 },
-  stats: zeroStats()
+  stats: zeroStats(),
+  uiDialog: null
+}
+
+/** transcript 视图模式（对齐 CC 桌面端 Normal/Verbose/Summary） */
+export type ViewMode = 'normal' | 'verbose' | 'summary'
+
+/** 应用级状态：会话桶 + 会话 pane 编排（1-2 个会话并排）+ 每会话布局 */
+export interface AppState {
+  sessions: Record<string, UIState>
+  metas: Record<string, SessionMeta>
+  /** 当前项目的会话列表（侧栏） */
+  sessionList: SessionMeta[]
+  /** 打开的会话 pane：1-2 个；focus 决定键盘/Composer 归属 */
+  panes: { left: string; right: string | null; focus: 'left' | 'right' }
+  /** 每会话的 pane 分割树 */
+  layouts: Record<string, PaneNode>
+  /** 每会话最大化的 pane（null = 无；最大化铺满会话区，其余 pane 保持开启但隐藏） */
+  maximized: Record<string, PaneKind | null>
+  drafts: Record<string, string>
+  /** File pane 当前文件（key 变化强制重挂载） */
+  fileTargets: Record<string, { path: string; key: number } | null>
+  /** 每会话的终端 PTY id 列表（pane 关闭不杀 PTY；重开回放） */
+  ptys: Record<string, string[]>
+  /** 聊天区 +N −M chip 数据 */
+  diffSummaries: Record<string, DiffSummary | null>
+  viewModes: Record<string, ViewMode>
+}
+
+export const initialAppState: AppState = {
+  sessions: {},
+  metas: {},
+  sessionList: [],
+  panes: { left: '', right: null, focus: 'left' },
+  layouts: {},
+  maximized: {},
+  drafts: {},
+  fileTargets: {},
+  ptys: {},
+  diffSummaries: {},
+  viewModes: {}
 }
 
 export type Action =
-  | { kind: 'event'; event: AgentEvent }
-  | { kind: 'reset' }
-  | { kind: 'closePermission' }
+  | { kind: 'addressed'; sessionId: string; event: AgentEvent }
+  | { kind: 'hydrate'; sessionId: string; result: SessionLoadResult }
+  | { kind: 'openSession'; sessionId: string; side?: 'left' | 'right' }
+  | { kind: 'closeSessionPane'; side: 'left' | 'right' }
+  | { kind: 'focusSessionPane'; side: 'left' | 'right' }
+  | { kind: 'togglePane'; sessionId: string; pane: 'files' | 'file' | 'terminal' | 'diff' }
+  | { kind: 'closePane'; sessionId: string; pane: PaneKind }
+  | { kind: 'setMaximized'; sessionId: string; pane: PaneKind | null }
+  | { kind: 'seedLayouts'; layouts: Record<string, PaneNode> }
+  | { kind: 'openFile'; sessionId: string; path: string }
+  | { kind: 'setDraft'; sessionId: string; text: string }
+  | { kind: 'setSessions'; list: SessionMeta[] }
+  | { kind: 'patchMeta'; sessionId: string; patch: Partial<SessionMeta> }
+  | { kind: 'setPty'; sessionId: string; ptyId: string | null }
+  | { kind: 'removePty'; sessionId: string; ptyId: string }
+  | { kind: 'setDiffSummary'; sessionId: string; summary: DiffSummary | null }
+  | { kind: 'setViewMode'; sessionId: string; mode: ViewMode }
+  | { kind: 'closePermission'; sessionId: string }
+  | { kind: 'closeUiDialog'; sessionId: string }
+  /** pane 拖拽/缩放（路径语义见 pane-layout） */
+  | { kind: 'paneRatio'; sessionId: string; path: number[]; ratio: number }
+  | { kind: 'paneDrop'; sessionId: string; win: PaneKind; target: PaneKind; mode: 'left' | 'right' | 'top' | 'bottom' | 'swap' }
 
 let turnSeq = 0
 
@@ -146,11 +243,19 @@ function toolsFromMessage(message: AgentMessage & { role: 'assistant' }, previou
   })
 }
 
-function userBlockOf(msg: AgentMessage & { role: 'user' }): { kind: 'user'; text: string; images?: ImageContent[] } {
-  if (typeof msg.content === 'string') return { kind: 'user', text: msg.content }
+function userBlockOf(msg: AgentMessage & { role: 'user' }): Block {
+  if (msg.injectedPath) return { kind: 'injected', rel: msg.injectedPath, nodeId: msg.nodeId }
+  const base = {
+    kind: 'user' as const,
+    text:
+      typeof msg.content === 'string'
+        ? msg.content
+        : msg.content.filter((b) => b.type === 'text').map((b) => b.text).join(''),
+    nodeId: msg.nodeId
+  }
+  if (typeof msg.content === 'string') return base
   return {
-    kind: 'user',
-    text: msg.content.filter((b) => b.type === 'text').map((b) => b.text).join(''),
+    ...base,
     images: msg.content.filter((b): b is ImageContent => b.type === 'image')
   }
 }
@@ -218,11 +323,22 @@ function applyEvent(state: UIState, e: AgentEvent): UIState {
     case 'message_end': {
       const msg = e.message
       if (msg.role === 'user') {
+        // 注入文件以独立合成消息进上下文：自成一个 turn（与 hydrate 的"每条 user 消息一个 turn"一致）
+        if (msg.injectedPath) {
+          turnSeq += 1
+          return {
+            ...state,
+            turns: [...state.turns, { key: `t${turnSeq}`, blocks: [userBlockOf(msg)], done: true }]
+          }
+        }
         const ub = userBlockOf(msg)
-        return mapTurn(state, (t) => ({
-          ...t,
-          blocks: t.blocks.map((b) => (b.kind === 'user' && b.text === '' && !b.images?.length ? ub : b))
-        }))
+        // message_start 已渲染同一条消息（nodeId 要到落盘时才有）——按最后一个 turn 里
+        // 首个未打标的 user 块回填；找不到（异常缺 message_start）时兜底追加保证可见
+        return mapTurn(state, (t) => {
+          const idx = t.blocks.findIndex((b) => b.kind === 'user' && !b.nodeId)
+          if (idx === -1) return { ...t, blocks: [...t.blocks, ub] }
+          return { ...t, blocks: t.blocks.map((b, i) => (i === idx ? ub : b)) }
+        })
       }
       if (msg.role === 'assistant') {
         const next = withAssistantBlock(state, (b) => ({
@@ -231,9 +347,12 @@ function applyEvent(state: UIState, e: AgentEvent): UIState {
           toolCalls: toolsFromMessage(msg, b.toolCalls),
           stopReason: msg.stopReason,
           errorMessage: msg.errorMessage,
-          streaming: false
+          streaming: false,
+          nodeId: msg.nodeId
         }))
-        const withStats = { ...next, stats: accumulateStats(next.stats, msg) }
+        // 上下文占用即时回落/推进：不等 turn_end（工具批次执行期间也反映最新一轮请求）
+        const withUsage = { ...next, usage: msg.usage ?? next.usage }
+        const withStats = { ...withUsage, stats: accumulateStats(withUsage.stats, msg) }
         if (msg.stopReason === 'error') {
           return { ...withStats, errorMessage: msg.errorMessage ?? '请求失败' }
         }
@@ -315,10 +434,11 @@ function applyEvent(state: UIState, e: AgentEvent): UIState {
       turnSeq += 1
       const notice: TurnVM = {
         key: `compact_${turnSeq}`,
-        blocks: [{ kind: 'user', text: `📜 已压缩历史（移除 ${e.removedCount} 条消息，上下文已释放）\n${e.summary}` }],
+        blocks: [{ kind: 'user', text: `已压缩历史（移除 ${e.removedCount} 条消息，上下文已释放）\n${e.summary}` }],
         done: true
       }
-      return { ...state, turns: [notice] }
+      // usage 是压缩前的旧口径，保留会让占用显示虚高；清零待下一轮真实 usage 回填
+      return { ...state, turns: [notice], usage: null }
     }
 
     case 'retrying':
@@ -332,16 +452,247 @@ function applyEvent(state: UIState, e: AgentEvent): UIState {
 
     case 'queue_update':
       return { ...state, queued: { steering: e.steering, followUp: e.followUp } }
+
+    case 'ui_request':
+      return {
+        ...state,
+        uiDialog: {
+          requestId: e.requestId,
+          kind: e.kind,
+          title: e.title,
+          ...(e.message !== undefined ? { message: e.message } : {}),
+          ...(e.placeholder !== undefined ? { placeholder: e.placeholder } : {}),
+          ...(e.options !== undefined ? { options: e.options } : {})
+        }
+      }
+
+    // 事件协议只增不改：未知事件类型（如并行落地的 panel_*）在此静默忽略，前向兼容
+    default:
+      return state
   }
 }
 
-export function reducer(state: UIState, action: Action): UIState {
+// ── hydrate：message 行 → 会话桶（修复旧"切换会话历史不渲染"问题：不再依赖 turn_start 重放） ──
+
+export function sessionStateFromMessages(messages: AgentMessage[]): UIState {
+  const turns: TurnVM[] = []
+  let stats = zeroStats()
+  let usage: Usage | null = null
+  let cur: TurnVM | null = null
+
+  const ensureTurn = (): TurnVM => {
+    if (!cur) {
+      turnSeq += 1
+      cur = { key: `t${turnSeq}`, blocks: [], done: false }
+      turns.push(cur)
+    }
+    return cur
+  }
+
+  for (const m of messages) {
+    if (m.role === 'user') {
+      turnSeq += 1
+      cur = { key: `t${turnSeq}`, blocks: [userBlockOf(m)], done: false }
+      turns.push(cur)
+    } else if (m.role === 'assistant') {
+      const turn = ensureTurn()
+      turn.blocks.push({
+        kind: 'assistant',
+        blocks: m.content.map((x) => ({ ...x })),
+        toolCalls: m.toolCalls.map((tc) => ({ callId: tc.id, name: tc.name, args: tc.arguments, status: 'streaming', updates: [] })),
+        stopReason: m.stopReason,
+        errorMessage: m.errorMessage,
+        streaming: false,
+        nodeId: m.nodeId
+      })
+      stats = accumulateStats(stats, m)
+      if (m.usage) usage = m.usage
+    } else {
+      const turn = ensureTurn()
+      for (const b of turn.blocks) {
+        if (b.kind !== 'assistant') continue
+        const tool = b.toolCalls.find((x) => x.callId === m.callId)
+        if (tool) {
+          tool.status = m.isError ? (m.content.includes('拒绝') ? 'denied' : 'error') : 'ok'
+          tool.result = m.content
+        }
+      }
+    }
+  }
+  // 中断会话可能存在无结果的工具调用：归一为 error，避免历史里永远转圈
+  for (const t of turns) {
+    t.done = true
+    for (const b of t.blocks) {
+      if (b.kind !== 'assistant') continue
+      b.streaming = false
+      for (const tool of b.toolCalls) {
+        if (tool.status === 'streaming' || tool.status === 'running' || tool.status === 'awaiting_approval') {
+          tool.status = 'error'
+          tool.result = tool.result ?? '（中断，无结果）'
+        }
+      }
+    }
+  }
+  return { ...initialSessionState, turns, stats, usage }
+}
+
+// ── 应用级 reducer ─────────────────────────────────────────
+
+const layoutOf = (s: AppState, sid: string): PaneNode => s.layouts[sid] ?? defaultPaneLayout()
+
+function focusedId(s: AppState): string {
+  return s.panes.focus === 'right' && s.panes.right ? s.panes.right : s.panes.left
+}
+
+export function appReducer(state: AppState, action: Action): AppState {
   switch (action.kind) {
-    case 'reset':
-      return { ...initialState }
-    case 'closePermission':
-      return { ...state, permission: null }
-    case 'event':
-      return applyEvent(state, action.event)
+    case 'addressed': {
+      // '' = 应用级 notice：落到当前聚焦会话
+      const sid = action.sessionId || focusedId(state)
+      if (!sid) return state
+      const bucket = state.sessions[sid] ?? initialSessionState
+      return { ...state, sessions: { ...state.sessions, [sid]: applyEvent(bucket, action.event) } }
+    }
+
+    case 'hydrate': {
+      const { sessionId, result } = action
+      if (!result.ok) return state
+      return {
+        ...state,
+        sessions: { ...state.sessions, [sessionId]: sessionStateFromMessages(result.messages) },
+        metas: { ...state.metas, [sessionId]: result.meta }
+      }
+    }
+
+    case 'openSession': {
+      const side = action.side ?? state.panes.focus
+      const panes =
+        side === 'right'
+          ? { ...state.panes, right: action.sessionId, focus: 'right' as const }
+          : { ...state.panes, left: action.sessionId, focus: 'left' as const }
+      return { ...state, panes }
+    }
+
+    case 'closeSessionPane': {
+      if (action.side === 'right') {
+        return { ...state, panes: { ...state.panes, right: null, focus: 'left' } }
+      }
+      // 左栏关闭：有右栏则顶替，否则保留（至少显示一个会话）
+      if (state.panes.right) {
+        return { ...state, panes: { left: state.panes.right, right: null, focus: 'left' } }
+      }
+      return state
+    }
+
+    case 'focusSessionPane':
+      return { ...state, panes: { ...state.panes, focus: action.side } }
+
+    case 'togglePane': {
+      const cur = layoutOf(state, action.sessionId)
+      const maxed = state.maximized[action.sessionId] ?? null
+      // 最大化中点自己的召唤钮：仅还原（保持开启），不动树
+      if (maxed === action.pane) {
+        return { ...state, maximized: { ...state.maximized, [action.sessionId]: null } }
+      }
+      const has = ((): boolean => {
+        const walk = (n: PaneNode): boolean => (n.t === 'leaf' ? n.kind === action.pane : walk(n.a) || walk(n.b))
+        return walk(cur)
+      })()
+      const next = has ? closePane(cur, action.pane) : openPane(cur, action.pane)
+      // 最大化期间点其他召唤钮：先还原再切换
+      const clearMax = maxed ? { ...state.maximized, [action.sessionId]: null } : state.maximized
+      return { ...state, layouts: { ...state.layouts, [action.sessionId]: next }, maximized: clearMax }
+    }
+
+    case 'closePane': {
+      // 真关闭：从树摘除；若关闭的是最大化 pane 则同时还原
+      const cur = layoutOf(state, action.sessionId)
+      const next = closePane(cur, action.pane)
+      const maxed = state.maximized[action.sessionId] ?? null
+      const maximized = maxed === action.pane ? { ...state.maximized, [action.sessionId]: null } : state.maximized
+      return { ...state, layouts: { ...state.layouts, [action.sessionId]: next }, maximized }
+    }
+
+    case 'setMaximized':
+      return { ...state, maximized: { ...state.maximized, [action.sessionId]: action.pane } }
+
+    case 'seedLayouts':
+      return { ...state, layouts: { ...action.layouts, ...state.layouts } }
+
+    case 'openFile': {
+      const cur = layoutOf(state, action.sessionId)
+      return {
+        ...state,
+        layouts: { ...state.layouts, [action.sessionId]: openPane(cur, 'file') },
+        fileTargets: { ...state.fileTargets, [action.sessionId]: { path: action.path, key: (state.fileTargets[action.sessionId]?.key ?? 0) + 1 } }
+      }
+    }
+
+    case 'setDraft':
+      return { ...state, drafts: { ...state.drafts, [action.sessionId]: action.text } }
+
+    case 'setSessions':
+      return { ...state, sessionList: action.list }
+
+    case 'patchMeta': {
+      const cur = state.metas[action.sessionId]
+      if (!cur) return state
+      return { ...state, metas: { ...state.metas, [action.sessionId]: { ...cur, ...action.patch } } }
+    }
+
+    case 'setPty': {
+      const cur = state.ptys[action.sessionId] ?? []
+      const next = action.ptyId ? [...cur, action.ptyId] : cur
+      return { ...state, ptys: { ...state.ptys, [action.sessionId]: next } }
+    }
+
+    case 'removePty':
+      return {
+        ...state,
+        ptys: { ...state.ptys, [action.sessionId]: (state.ptys[action.sessionId] ?? []).filter((x) => x !== action.ptyId) }
+      }
+
+    case 'setDiffSummary':
+      return { ...state, diffSummaries: { ...state.diffSummaries, [action.sessionId]: action.summary } }
+
+    case 'setViewMode':
+      return { ...state, viewModes: { ...state.viewModes, [action.sessionId]: action.mode } }
+
+    case 'closePermission': {
+      const bucket = state.sessions[action.sessionId]
+      if (!bucket) return state
+      return { ...state, sessions: { ...state.sessions, [action.sessionId]: { ...bucket, permission: null } } }
+    }
+    case 'closeUiDialog': {
+      const bucket = state.sessions[action.sessionId]
+      if (!bucket) return state
+      return { ...state, sessions: { ...state.sessions, [action.sessionId]: { ...bucket, uiDialog: null } } }
+    }
+
+    case 'paneRatio':
+      return { ...state, layouts: { ...state.layouts, [action.sessionId]: setRatioAt(layoutOf(state, action.sessionId), action.path, action.ratio) } }
+
+    case 'paneDrop': {
+      const cur = layoutOf(state, action.sessionId)
+      if (action.win === action.target) return state
+      if (action.mode === 'swap') {
+        if (!findPath(cur, action.target)) return state
+        return { ...state, layouts: { ...state.layouts, [action.sessionId]: swapKinds(cur, action.win, action.target) } }
+      }
+      const p = findPath(cur, action.win)
+      if (!p) return state
+      const removed = removeAt(cur, p)
+      if (!removed) return state
+      const dir = action.mode === 'left' || action.mode === 'right' ? ('row' as const) : ('col' as const)
+      const first = action.mode === 'left' || action.mode === 'top'
+      if (!findPath(removed, action.target)) {
+        const fresh: PaneNode = { t: 'leaf', kind: action.win }
+        return {
+          ...state,
+          layouts: { ...state.layouts, [action.sessionId]: { t: 'split', dir, ratio: 0.5, a: first ? fresh : removed, b: first ? removed : fresh } }
+        }
+      }
+      return { ...state, layouts: { ...state.layouts, [action.sessionId]: insertNear(removed, action.target, dir, first, action.win) } }
+    }
   }
 }

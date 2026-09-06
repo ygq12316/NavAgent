@@ -1,0 +1,21 @@
+node_modules/
+dist/
+out/
+*.local
+
+# 本地工具状态（skills CLI 安装副本、brainstorm 运行数据、个人设置）
+.agents/
+.superpowers/
+.claude/settings.local.json
+.claude/skills/
+skills-lock.json
+# 模型参考文件
+docs/
+# 会话生成的工作副本
+.claude/worktrees/
+# 测试文件
+**/__tests__/
+# 工具运行时状态
+.playwright-mcp/
+# 截图类临时产物不进根目录
+/*.png

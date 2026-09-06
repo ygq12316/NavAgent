@@ -1,97 +1,210 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { SessionMeta } from '@shared/types'
-import { IconBranch, IconDownload, IconSearch, IconTrash } from './icons'
-
-// 会话按时间分组标签（自 Sidebar.tsx 原样迁移）
-function groupLabel(ts: number): string {
-  const d = new Date(ts)
-  const now = new Date()
-  const day = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
-  const diff = (day(now) - day(d)) / 86_400_000
-  if (diff <= 0) return '今天'
-  if (diff === 1) return '昨天'
-  if (diff <= 7) return '近 7 天'
-  return '更早'
-}
-
-function relTime(ts: number): string {
-  const m = Math.round((Date.now() - ts) / 60_000)
-  if (m < 1) return '刚刚'
-  if (m < 60) return `${m} 分钟前`
-  const h = Math.round(m / 60)
-  if (h < 24) return `${h} 小时前`
-  return `${Math.round(h / 24)} 天前`
-}
+import { IconChevronDown, IconChevronRight, IconDots, IconFolderOpen } from './icons'
 
 interface Props {
-  sessions: SessionMeta[]
-  currentSessionId: string
-  working: boolean
+  /** 项目路径 → 该项目下的会话列表（含已归档，按 meta.archived 区分） */
+  sessionsByProject: Record<string, SessionMeta[]>
+  /** 项目顺序（当前项目在前） */
+  projects: string[]
+  /** 当前项目（新会话落点，高亮标记） */
+  activeProject: string
+  /** 各 pane 当前打开的会话（高亮） */
+  activeIds: string[]
+  /** 运行中的会话 id（侧栏运行指示） */
+  workingIds: Set<string>
   onNew: () => void
-  onSwitch: (id: string) => void
-  /** 删除（内部 confirm 确认后回调） */
+  /** 点击 = 焦点栏打开；Ctrl+点击 = 第二栏并排（对齐 CC 桌面端） */
+  onOpen: (id: string, side: 'left' | 'right') => void
   onDelete: (id: string) => void
-  onOpenTree: () => void
   onExport: (id: string) => void
-  onImport: () => void
+  /** 重命名会话（Enter/失焦提交） */
+  onRename: (id: string, title: string) => void
+  /** 归档 / 取消归档 */
+  onArchive: (id: string, archived: boolean) => void
 }
 
+const baseName = (p: string) => p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? p
+
 export function RailSessions(p: Props) {
-  const [query, setQuery] = useState('')
-  const filtered = p.sessions.filter((s) => s.title.toLowerCase().includes(query.toLowerCase()))
-  const groups: { label: string; items: SessionMeta[] }[] = []
-  for (const s of filtered) {
-    const label = groupLabel(s.updatedAt)
-    const last = groups[groups.length - 1]
-    if (last && last.label === label) last.items.push(s)
-    else groups.push({ label, items: [s] })
+  const [menu, setMenu] = useState<{ x: number; y: number; id: string; title: string; archived: boolean } | null>(null)
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const [archOpen, setArchOpen] = useState(false)
+  /** 行内重命名态：id + 当前输入值 */
+  const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const renameRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    const onDoc = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenu(null)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [])
+
+  // 进入重命名即聚焦全选
+  useEffect(() => {
+    if (renaming) {
+      renameRef.current?.focus()
+      renameRef.current?.select()
+    }
+  }, [renaming?.id])
+
+  const commitRename = (): void => {
+    if (renaming && renaming.value.trim()) p.onRename(renaming.id, renaming.value)
+    setRenaming(null)
   }
+
+  const item = (s: SessionMeta, archived = false) => {
+    const active = p.activeIds.includes(s.id)
+    const running = p.workingIds.has(s.id)
+    const isRenaming = renaming?.id === s.id
+    return (
+      <div key={s.id} className={`session-entry${active ? ' active' : ''}${archived ? ' archived' : ''}`}>
+        {isRenaming ? (
+          <div className="session-item renaming">
+            <input
+              ref={renameRef}
+              className="session-rename-input"
+              value={renaming.value}
+              placeholder="会话名称"
+              onChange={(e) => setRenaming({ id: s.id, value: e.target.value })}
+              onBlur={commitRename}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') commitRename()
+                if (e.key === 'Escape') setRenaming(null)
+              }}
+              onClick={(e) => e.stopPropagation()}
+            />
+          </div>
+        ) : (
+          <div
+            className="session-item"
+            role="button"
+            tabIndex={0}
+            onClick={(e) => p.onOpen(s.id, e.ctrlKey || e.metaKey ? 'right' : 'left')}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              setMenu({ x: e.clientX, y: e.clientY, id: s.id, title: s.title, archived: Boolean(s.archived) })
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') p.onOpen(s.id, 'left')
+            }}
+            title={`${s.title}（Ctrl+点击在第二栏打开）`}
+          >
+            <span className="session-item-title">
+              {running && <span className="spin-ring session-running" />}
+              <span className="session-item-name">{s.title}</span>
+            </span>
+            <button
+              className="row-dots"
+              title="更多操作"
+              onClick={(e) => {
+                e.stopPropagation()
+                const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                setMenu({ x: r.left, y: r.bottom + 2, id: s.id, title: s.title, archived: Boolean(s.archived) })
+              }}
+            >
+              <IconDots size={12} />
+            </button>
+          </div>
+        )}
+      </div>
+    )
+  }
+
   return (
     <>
-      <button className="btn btn-primary new-chat" disabled={p.working} onClick={p.onNew}>＋ 新建对话</button>
-      <div className="search sunken">
-        <span className="search-icon"><IconSearch size={13} /></span>
-        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索会话" />
-      </div>
-      <button className="btn btn-ghost branch-entry" disabled={p.working || !p.currentSessionId} onClick={p.onOpenTree} title="浏览当前会话的分支树">
-        <IconBranch size={13} /> 分支树
+      <button className="rail-new" onClick={p.onNew} title="新建会话（Ctrl+N）">
+        <span className="rail-new-text">＋ 新建对话</span>
       </button>
-      <div className="session-head">
-        <span className="session-group-label">会话</span>
-        <button className="btn btn-ghost" disabled={p.working} onClick={p.onImport} title="从 JSONL 文件导入会话">导入</button>
-      </div>
       <div className="session-list">
-        {groups.length === 0 && <div className="session-empty">暂无会话</div>}
-        {groups.map((g) => (
-          <div key={g.label} className="session-group">
-            <div className="session-group-label">{g.label}</div>
-            {g.items.map((s) => (
-              <div key={s.id} className="session-entry">
-                <button
-                  className={`session-item ${s.id === p.currentSessionId ? 'active' : ''}`}
-                  disabled={p.working}
-                  onClick={() => p.onSwitch(s.id)}
-                  title={s.title}
-                >
-                  <span className="session-title">{s.title}</span>
-                  <span className="session-time">{relTime(s.updatedAt)}</span>
-                </button>
-                <button className="icon-btn raised small session-export" disabled={p.working} onClick={() => p.onExport(s.id)} title="导出"><IconDownload size={13} /></button>
-                <button
-                  className="icon-btn raised small session-export"
-                  disabled={p.working}
-                  onClick={() => {
-                    if (window.confirm(`删除会话「${s.title}」？此操作不可恢复。`)) p.onDelete(s.id)
-                  }}
-                  title="删除会话"
-                >
-                  <IconTrash size={13} />
-                </button>
+        {p.projects.length === 0 && <div className="session-empty">暂无项目</div>}
+        {p.projects.map((proj) => {
+          const all = p.sessionsByProject[proj] ?? []
+          const items = all.filter((s) => !s.archived)
+          const archivedItems = all.filter((s) => s.archived)
+          const isCollapsed = collapsed.has(proj)
+          return (
+            <div key={proj} className="project-group">
+              <div
+                className={`project-group-label${proj === p.activeProject ? ' on' : ''}`}
+                onClick={() =>
+                  setCollapsed((prev) => {
+                    const next = new Set(prev)
+                    if (next.has(proj)) next.delete(proj)
+                    else next.add(proj)
+                    return next
+                  })
+                }
+                title={proj}
+              >
+                {isCollapsed ? <IconChevronRight size={11} /> : <IconChevronDown size={11} />}
+                <IconFolderOpen size={12} />
+                <span className="project-group-name">{baseName(proj)}</span>
               </div>
-            ))}
-          </div>
-        ))}
+              {!isCollapsed && (
+                <div className="project-group-body">
+                  {items.length === 0 && archivedItems.length === 0 && <div className="session-empty">（无会话）</div>}
+                  {items.map((s) => item(s))}
+                  {archivedItems.length > 0 && (
+                    <>
+                      <div className="archived-label" onClick={() => setArchOpen((v) => !v)}>
+                        {archOpen ? <IconChevronDown size={10} /> : <IconChevronRight size={10} />}
+                        已归档（{archivedItems.length}）
+                      </div>
+                      {archOpen && archivedItems.map((s) => item(s, true))}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          )
+        })}
       </div>
+      {menu && (
+        <div ref={menuRef} className="ctx-menu" style={{ left: menu.x, top: menu.y }}>
+          {!menu.archived && (
+            <button
+              className="ctx-item"
+              onClick={() => {
+                setRenaming({ id: menu.id, value: menu.title })
+                setMenu(null)
+              }}
+            >
+              重命名
+            </button>
+          )}
+          <button
+            className="ctx-item"
+            onClick={() => {
+              p.onArchive(menu.id, !menu.archived)
+              setMenu(null)
+            }}
+          >
+            {menu.archived ? '取消归档' : '归档'}
+          </button>
+          <button
+            className="ctx-item"
+            onClick={() => {
+              p.onExport(menu.id)
+              setMenu(null)
+            }}
+          >
+            导出会话
+          </button>
+          <button
+            className="ctx-item danger"
+            onClick={() => {
+              if (window.confirm(`删除会话「${menu.title}」？此操作不可恢复。`)) p.onDelete(menu.id)
+              setMenu(null)
+            }}
+          >
+            删除会话
+          </button>
+        </div>
+      )}
     </>
   )
 }

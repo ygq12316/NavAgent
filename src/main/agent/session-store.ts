@@ -1,20 +1,17 @@
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, readdirSync, readFileSync, writeFileSync, appendFileSync, renameSync, rmSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { AgentEvent, AgentMessage, SessionMeta, SessionTreeNode } from '@shared/types'
+import type { AgentEvent, AgentMessage, SessionMeta, SessionSearchHit, SessionTreeNode } from '@shared/types'
 import { messageText } from '@shared/types'
 import { ancestorChain, type ParentMap } from './branch'
-
-interface JsonlLine {
-  ts: number
-  /** 树节点 id（只有 message/snapshot 行是节点） */
-  id?: string
-  parentId?: string | null
-  event?: AgentEvent
-  message?: AgentMessage
-  /** 压缩后的完整消息快照：路径重建时遇到即清空此前累积 */
-  snapshot?: AgentMessage[]
-}
+import {
+  importLinesInto,
+  makeNodeRow,
+  migrateLegacyLayout,
+  normalizeMessage,
+  SessionDb,
+  type JsonlLine
+} from './session-db'
 
 interface NodeRec {
   id: string
@@ -25,72 +22,20 @@ interface NodeRec {
 }
 
 /**
- * 旧版本持久化兼容：assistant content 曾是纯字符串，加载时升级为单个 text 块。
- * 幂等（块数组原样返回），只在 load 收口调用。
- */
-function normalizeMessage(m: AgentMessage): AgentMessage {
-  if (m.role === 'assistant' && typeof (m.content as unknown) === 'string') {
-    return { ...m, content: [{ type: 'text', text: m.content as unknown as string }] }
-  }
-  return m
-}
-
-/**
- * 会话持久化（设计方案 4.5 + 会话树）：目录按项目分组，JSONL append-only；
- * message/snapshot 行是树节点（id/parentId），event 行不参与树（仅 UI 重放/调试）；
+ * 会话持久化（SQLite 权威存储 + JSONL 导入/导出格式，设计方案 4.5 + 会话树）：
+ * message/snapshot 行是树节点（id/parentId），event 行不参与树（仅调试/导出）；
  * meta.leafId 为活动叶子，恢复 = 沿 parent 链回溯根再正向重放（snapshot 行清空此前累积）。
- * 旧格式（无 id）在 load 时一次性原子迁移为线性链。
+ * 旧 JSONL+meta.json 布局在构造时一次性迁移入库（见 session-db.migrateLegacyLayout）。
  */
 export class SessionStore {
-  private root: string
+  private db: SessionDb
   private metas = new Map<string, SessionMeta>()
   currentId: string | null = null
 
   constructor(userDataPath: string) {
-    this.root = join(userDataPath, 'sessions')
-    this.scanAll()
-  }
-
-  private keyOf(projectPath: string): string {
-    return projectPath.replace(/[^a-zA-Z0-9一-龥]+/g, '_').slice(0, 80) || 'default'
-  }
-
-  private dirOf(id: string): string {
-    const meta = this.metas.get(id)
-    return join(this.root, this.keyOf(meta?.projectPath ?? 'default'))
-  }
-
-  private fileOf(id: string): string {
-    return join(this.dirOf(id), `${id}.jsonl`)
-  }
-
-  private metaFileOf(id: string): string {
-    return join(this.dirOf(id), `${id}.meta.json`)
-  }
-
-  private scanAll(): void {
-    let projectDirs: string[] = []
-    try {
-      projectDirs = readdirSync(this.root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name)
-    } catch {
-      return
-    }
-    for (const dir of projectDirs) {
-      const full = join(this.root, dir)
-      try {
-        for (const f of readdirSync(full)) {
-          if (!f.endsWith('.meta.json')) continue
-          try {
-            const meta = JSON.parse(readFileSync(join(full, f), 'utf-8')) as SessionMeta
-            if (meta.id) this.metas.set(meta.id, meta)
-          } catch {
-            // 单个 meta 损坏不阻塞其余会话
-          }
-        }
-      } catch {
-        // 目录读取失败跳过
-      }
-    }
+    this.db = new SessionDb(join(userDataPath, 'sessions.db'))
+    migrateLegacyLayout(userDataPath, this.db)
+    for (const meta of this.db.allSessions()) this.metas.set(meta.id, meta)
   }
 
   list(projectPath: string): SessionMeta[] {
@@ -117,29 +62,35 @@ export class SessionStore {
     return activePathMessages(nodes, this.resolveLeaf(meta, nodes))
   }
 
-  /** 导出源文件路径（先确保旧格式迁移完成） */
-  sourceFileOf(id: string): string {
+  /** 导出为旧格式 JSONL 字符串（与 importFrom 互逆） */
+  exportJsonl(id: string): string {
     if (!this.metas.has(id)) throw new Error(`会话不存在：${id}`)
-    this.readNodes(id)
-    return this.fileOf(id)
+    return this.db.exportJsonl(id)
   }
 
   /**
-   * 删除会话（jsonl + meta）。存在性以 metas 注册表为准：
-   * 刚 create 的会话可能还没有 jsonl（仅 meta），未注册的 id 一律 not-found（不抛错）。
+   * 删除会话（nodes/events/ext_state/sessions 四表单事务）。存在性以 metas 注册表为准：
+   * 刚 create 的会话行已存在，未注册的 id 一律 not-found（不抛错）。
    * 被删会话若为当前会话，currentId 置空；自动切换/重放由 IPC 层负责。
    */
   remove(id: string): 'ok' | 'not-found' {
     if (!this.metas.has(id)) return 'not-found'
-    rmSync(this.fileOf(id), { force: true })
-    rmSync(this.metaFileOf(id), { force: true })
+    // 断线提升：派生子会话不级联删除，脱离父级成为新的根（会话地图语义）
+    for (const m of this.metas.values()) {
+      if (m.forkSourceId === id) {
+        delete m.forkSourceId
+        delete m.forkNodeId
+        this.db.updateSessionColumns(m.id, { forkSourceId: null, forkNodeId: null })
+      }
+    }
+    this.db.deleteSessionAll(id)
     this.metas.delete(id)
     if (this.currentId === id) this.currentId = null
     return 'ok'
   }
 
   /**
-   * 从 JSONL 文件导入为新会话：逐行校验 → 合成节点 id（若缺）→ 写入当前项目分组 → 切为当前会话。
+   * 从 JSONL 文件导入为新会话：逐行校验 → 合成节点 id（若缺）→ 入库 → 切为当前会话。
    * 结构非法抛错，由调用侧转 notice。
    */
   importFrom(srcPath: string, projectPath: string, model: string): SessionMeta {
@@ -172,12 +123,13 @@ export class SessionStore {
     const registered = this.metas.get(meta.id)!
     registered.title = (firstUser ? messageText(firstUser).slice(0, 40) : '') || '导入的会话'
     if (lastNodeId) registered.leafId = lastNodeId
-    appendFileSync(this.fileOf(registered.id), normalized.map((l) => JSON.stringify(l)).join('\n') + '\n', 'utf-8')
-    this.writeMeta(registered.id)
+    this.db.updateSessionColumns(meta.id, { title: registered.title })
+    importLinesInto(this.db, meta.id, normalized)
+    if (lastNodeId) this.db.setSessionLeaf(meta.id, lastNodeId)
     return { ...registered }
   }
 
-  create(projectPath: string, model: string): SessionMeta {
+  create(projectPath: string, model: string, opts?: { permissionMode?: SessionMeta['permissionMode'] }): SessionMeta {
     const meta: SessionMeta = {
       id: randomUUID(),
       projectPath,
@@ -185,12 +137,11 @@ export class SessionStore {
       createdAt: Date.now(),
       updatedAt: Date.now(),
       model,
-      leafId: undefined
+      leafId: undefined,
+      ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {})
     }
-    // 先注册再建目录：dirOf 依赖 metas 里的 projectPath，顺序反了会把数据写进 'default' 目录且后续 append 静默失败
+    this.db.insertSession(meta)
     this.metas.set(meta.id, meta)
-    mkdirSync(this.dirOf(meta.id), { recursive: true })
-    this.writeMeta(meta.id)
     this.currentId = meta.id
     return { ...meta }
   }
@@ -198,25 +149,11 @@ export class SessionStore {
   load(id: string): { meta: SessionMeta; messages: AgentMessage[]; events: AgentEvent[] } {
     const meta = this.metas.get(id)
     if (!meta) throw new Error(`会话不存在：${id}`)
-    this.currentId = id
-    let lines: JsonlLine[] = []
-    try {
-      lines = readFileSync(this.fileOf(id), 'utf-8')
-        .split('\n')
-        .filter((l) => l.trim().length > 0)
-        .map((l) => JSON.parse(l) as JsonlLine)
-    } catch {
-      lines = []
-    }
-    lines = this.migrateIfNeeded(id, lines)
-
-    const events: AgentEvent[] = []
-    for (const line of lines) {
-      if (line.event) events.push(line.event)
-    }
-    const nodes = linesToNodes(lines)
+    // 并行会话模型下 load 是纯读取（renderer 自行 hydrate）；currentId 仅剩 json-mode 语义
+    const events = this.db.eventsOf(id)
+    const nodes = this.readNodes(id)
     const leaf = this.resolveLeaf(meta, nodes)
-    const messages = activePathMessages(nodes, leaf)
+    const messages = activePathMessages(nodes, leaf, true)
     this.touch(id)
     return { meta: { ...meta }, messages, events }
   }
@@ -224,17 +161,13 @@ export class SessionStore {
   // ── 会话树操作 ────────────────────────────────────────────────
 
   private readNodes(id: string): NodeRec[] {
-    let lines: JsonlLine[] = []
-    try {
-      lines = readFileSync(this.fileOf(id), 'utf-8')
-        .split('\n')
-        .filter((l) => l.trim().length > 0)
-        .map((l) => JSON.parse(l) as JsonlLine)
-    } catch {
-      return []
-    }
-    lines = this.migrateIfNeeded(id, lines)
-    return linesToNodes(lines)
+    return linesToNodes(
+      this.db.nodesOf(id).map((r) =>
+        r.kind === 'snapshot'
+          ? { ts: r.ts, id: r.id, parentId: r.parentId, snapshot: JSON.parse(r.payload) as AgentMessage[] }
+          : { ts: r.ts, id: r.id, parentId: r.parentId, message: JSON.parse(r.payload) as AgentMessage }
+      )
+    )
   }
 
   private resolveLeaf(meta: SessionMeta, nodes: NodeRec[]): string | null {
@@ -242,7 +175,7 @@ export class SessionStore {
     if (meta.leafId && nodes.some((n) => n.id === meta.leafId)) return meta.leafId
     const last = nodes[nodes.length - 1].id
     meta.leafId = last
-    this.writeMeta(meta.id)
+    this.db.setSessionLeaf(meta.id, last)
     return last
   }
 
@@ -262,16 +195,14 @@ export class SessionStore {
   listTree(id: string): SessionTreeNode[] {
     const meta = this.metas.get(id)
     if (!meta) throw new Error(`会话不存在：${id}`)
-    return this.readNodes(id).map((n) => ({
-      id: n.id,
-      parentId: n.parentId,
-      kind: n.kind,
-      role: n.kind === 'snapshot' ? ('snapshot' as const) : n.messages[0]!.role,
-      ts: n.ts,
-      preview:
-        n.kind === 'snapshot'
-          ? `[压缩快照 · ${n.messages.length} 条]`
-          : messageText(n.messages[0]!).slice(0, 80)
+    // role/nmsgs/txt 为入库派生列，此处免 parse payload
+    return this.db.treeRowsOf(id).map((r) => ({
+      id: r.id,
+      parentId: r.parentId,
+      kind: r.kind,
+      role: r.role as SessionTreeNode['role'],
+      ts: r.ts,
+      preview: r.kind === 'snapshot' ? `[压缩快照 · ${r.nmsgs} 条]` : r.txt.slice(0, 80)
     }))
   }
 
@@ -282,7 +213,7 @@ export class SessionStore {
     const nodes = this.readNodes(id)
     if (!nodes.some((n) => n.id === nodeId)) throw new Error(`树节点不存在：${nodeId}`)
     meta.leafId = nodeId
-    this.writeMeta(id)
+    this.db.setSessionLeaf(id, nodeId)
     return { messages: activePathMessages(nodes, nodeId) }
   }
 
@@ -301,7 +232,7 @@ export class SessionStore {
     return out
   }
 
-  /** 从指定节点派生新会话：祖先链消息行（保留原节点 id）写入新文件并切换为当前会话 */
+  /** 从指定节点派生新会话：祖先链节点行（保留原节点 id）入库并切换为当前会话 */
   fork(id: string, nodeId: string): SessionMeta {
     const src = this.metas.get(id)
     if (!src) throw new Error(`会话不存在：${id}`)
@@ -315,12 +246,17 @@ export class SessionStore {
     const meta = this.metas.get(created.id)!
     meta.title = `${src.title}（fork）`
     meta.leafId = nodeId
-    const lines: JsonlLine[] = chain.map((nid) => {
-      const n = byId.get(nid)!
-      return { ts: n.ts, id: n.id, parentId: n.parentId, ...(n.kind === 'snapshot' ? { snapshot: n.messages } : { message: n.messages[0]! }) }
+    // 派生来源：会话地图（session-graph）按此连父子边
+    meta.forkSourceId = id
+    meta.forkNodeId = nodeId
+    this.db.tx(() => {
+      this.db.updateSessionColumns(created.id, { title: meta.title, forkSourceId: id, forkNodeId: nodeId })
+      for (const nid of chain) {
+        const n = byId.get(nid)!
+        this.db.insertNode(makeNodeRow(created.id, n.id, n.parentId, n.kind, n.messages, n.ts, this.db.allocSeq(created.id)), 'ignore')
+      }
+      this.db.setSessionLeaf(created.id, nodeId)
     })
-    appendFileSync(this.fileOf(meta.id), lines.map((l) => JSON.stringify(l)).join('\n') + '\n', 'utf-8')
-    this.writeMeta(meta.id)
     return { ...meta }
   }
 
@@ -331,18 +267,19 @@ export class SessionStore {
     return this.fork(id, leaf)
   }
 
+  /** 事件行入库；message_end 不重复落（节点行已承载完整消息）；turn_end 刷新 updatedAt */
   appendEvent(id: string, e: AgentEvent): void {
     try {
-      appendFileSync(this.fileOf(id), JSON.stringify({ ts: Date.now(), event: e }) + '\n', 'utf-8')
+      if (e.type !== 'message_end') this.db.insertEvent(id, this.db.allocSeq(id), Date.now(), e)
       if (e.type === 'turn_end') this.touch(id)
     } catch {
       // 持久化失败不阻塞对话
     }
   }
 
-  /** 追加消息为新的树节点（parent=当前叶子，随后叶子前移） */
-  appendMessage(id: string, m: AgentMessage): void {
-    this.appendNode(id, { ts: Date.now(), message: m })
+  /** 追加消息节点；返回节点 id（供事件信封打标，live 消息可定位 rewind/fork） */
+  appendMessage(id: string, m: AgentMessage): string {
+    return this.appendNode(id, { ts: Date.now(), message: m })
   }
 
   /** 压缩快照：单个树节点承载替换后的完整消息链 */
@@ -350,70 +287,132 @@ export class SessionStore {
     this.appendNode(id, { ts: Date.now(), snapshot: messages })
   }
 
-  private appendNode(id: string, line: { ts: number; message?: AgentMessage; snapshot?: AgentMessage[] }): void {
+  private appendNode(id: string, line: { ts: number; message?: AgentMessage; snapshot?: AgentMessage[] }): string {
     const meta = this.metas.get(id)
-    if (!meta) return
+    if (!meta) return ''
     const nodeId = randomUUID()
-    const full: JsonlLine = { ...line, id: nodeId, parentId: meta.leafId ?? null }
     try {
-      appendFileSync(this.fileOf(id), JSON.stringify(full) + '\n', 'utf-8')
+      const parentId = meta.leafId ?? null
+      const seq = this.db.allocSeq(id)
+      if (line.message !== undefined) {
+        this.db.insertNode(makeNodeRow(id, nodeId, parentId, 'message', [{ ...line.message, nodeId }], line.ts, seq))
+      } else {
+        this.db.insertNode(makeNodeRow(id, nodeId, parentId, 'snapshot', line.snapshot ?? [], line.ts, seq))
+      }
       meta.leafId = nodeId
-      this.writeMeta(id)
+      this.db.setSessionLeaf(id, nodeId)
     } catch {
-      // 同上
+      // 持久化失败不阻塞对话
     }
+    return nodeId
   }
 
   ensureTitle(id: string, firstUserText: string): void {
     const meta = this.metas.get(id)
     if (!meta || meta.title !== '新对话') return
     meta.title = firstUserText.slice(0, 40) || '新对话'
-    this.writeMeta(id)
+    this.db.updateSessionColumns(id, { title: meta.title })
   }
 
-  private writeMeta(id: string): void {
+  /** 记录会话工作区（worktree 首次创建成功后落定） */
+  setWorktree(id: string, worktreePath: string): void {
     const meta = this.metas.get(id)
     if (!meta) return
+    meta.worktreePath = worktreePath
+    this.db.updateSessionColumns(id, { worktreePath })
+  }
+
+  /** 扩展会话级 K-V：整表快照 UPSERT（last-wins；不参与树/事件重放） */
+  appendExtState(id: string, state: Record<string, unknown>): void {
+    if (!this.metas.has(id)) return
     try {
-      writeFileSync(this.metaFileOf(id), JSON.stringify(meta, null, 2), 'utf-8')
+      this.db.setExtState(id, state, Date.now())
     } catch {
-      // 忽略
+      // 持久化失败不阻塞扩展
     }
   }
 
-  /** 旧格式（节点行缺 id）迁移：内存合成线性链后原子重写；已迁移则原样返回 */
-  private migrateIfNeeded(id: string, lines: JsonlLine[]): JsonlLine[] {
-    if (!lines.some((l) => (l.message || l.snapshot) && !l.id)) return lines
-    let prev: string | null = null
-    const out = lines.map((l) => {
-      if (!(l.message || l.snapshot)) return l
-      const next: JsonlLine = { ...l, id: l.id ?? randomUUID(), parentId: l.parentId ?? prev }
-      prev = next.id ?? null
-      return next
-    })
+  /** 最近一次扩展状态快照（无则空表）；供 ctx.session 惰性缓存初始化 */
+  loadExtState(id: string): Record<string, unknown> {
     try {
-      const tmp = this.fileOf(id) + '.tmp'
-      writeFileSync(tmp, out.map((l) => JSON.stringify(l)).join('\n') + '\n', 'utf-8')
-      renameSync(tmp, this.fileOf(id))
-      const meta = this.metas.get(id)
-      if (meta && !meta.leafId) {
-        const last = out.filter((l) => l.message || l.snapshot).at(-1)
-        if (last?.id) {
-          meta.leafId = last.id
-          this.writeMeta(id)
-        }
-      }
+      return this.db.getExtState(id) ?? {}
     } catch {
-      // 迁移失败降级为内存态（下次 load 重试）
+      return {}
     }
-    return out
+  }
+
+  /** 会话权限模式（setSessionMode IPC 落盘 + 运行中实例即时生效） */
+  setPermissionMode(id: string, mode: SessionMeta['permissionMode']): void {
+    const meta = this.metas.get(id)
+    if (!meta) return
+    meta.permissionMode = mode
+    this.db.updateSessionColumns(id, { permissionMode: mode })
+  }
+
+  /** 会话级模型切换（上下文窗口/压缩阈值按该模型的目录定义解析；provider 与归属供应商在下一次 prompt 时按会话解析） */
+  setModel(id: string, model: string): SessionMeta | null {
+    const meta = this.metas.get(id)
+    if (!meta) return null
+    const next = String(model ?? '').trim()
+    if (!next) return { ...meta }
+    meta.model = next
+    this.db.updateSessionColumns(id, { model: meta.model })
+    return { ...meta }
+  }
+
+  /** 重锚会话工作目录：切换 meta.projectPath（文件树/工具/git 经 workspaceOf 即时跟随） */
+  setProject(id: string, projectPath: string): SessionMeta | null {
+    const meta = this.metas.get(id)
+    if (!meta) return null
+    const next = String(projectPath ?? '').trim()
+    if (!next) return { ...meta }
+    meta.projectPath = next
+    this.db.updateSessionColumns(id, { projectPath: next })
+    return { ...meta }
+  }
+
+  /** 重命名会话（手动命名后 ensureTitle 不再覆盖：其只对默认标题生效） */
+  rename(id: string, title: string): SessionMeta | null {
+    const meta = this.metas.get(id)
+    if (!meta) return null
+    const next = title.trim()
+    if (!next) return { ...meta }
+    meta.title = next.slice(0, 80)
+    this.db.updateSessionColumns(id, { title: meta.title })
+    return { ...meta }
+  }
+
+  /** 归档/取消归档 */
+  setArchived(id: string, archived: boolean): SessionMeta | null {
+    const meta = this.metas.get(id)
+    if (!meta) return null
+    meta.archived = archived || undefined
+    this.db.updateSessionColumns(id, { archived: Boolean(meta.archived) })
+    return { ...meta }
+  }
+
+  /** 全文检索（LIKE 子串，依赖 nodes.txt 派生列）；结果按会话元数据补全标题 */
+  search(text: string, sessionIds: string[] | null = null, limit = 50): SessionSearchHit[] {
+    if (typeof text !== 'string' || text.trim().length === 0) return []
+    try {
+      const hits = this.db.search(text, sessionIds, limit)
+      const out: SessionSearchHit[] = []
+      for (const h of hits) {
+        const meta = this.metas.get(h.sessionId)
+        if (!meta) continue
+        out.push({ sessionId: h.sessionId, nodeId: h.nodeId, title: meta.title, updatedAt: meta.updatedAt, snippet: h.snippet })
+      }
+      return out
+    } catch {
+      return []
+    }
   }
 
   private touch(id: string): void {
     const meta = this.metas.get(id)
     if (!meta) return
     meta.updatedAt = Date.now()
-    this.writeMeta(id)
+    this.db.touchSession(id, meta.updatedAt)
   }
 }
 
@@ -432,7 +431,7 @@ function linesToNodes(lines: JsonlLine[]): NodeRec[] {
 }
 
 /** root→leaf 正向重放：snapshot 节点清空此前累积（保留压缩语义），其余按序展开 */
-function activePathMessages(nodes: NodeRec[], leafId: string | null): AgentMessage[] {
+function activePathMessages(nodes: NodeRec[], leafId: string | null, stamp = false): AgentMessage[] {
   if (!leafId) return []
   const byId = new Map(nodes.map((n) => [n.id, n]))
   const chain: NodeRec[] = []
@@ -447,7 +446,13 @@ function activePathMessages(nodes: NodeRec[], leafId: string | null): AgentMessa
   const out: AgentMessage[] = []
   for (const n of chain) {
     if (n.kind === 'snapshot') out.length = 0
-    out.push(...n.messages)
+    // stamp=false 时剥离 nodeId（历史比较/续跑语义保持纯净）；stamp=true 供 renderer 定位
+    const msgs = n.messages.map((m) => {
+      if (stamp) return { ...m, nodeId: n.id }
+      const { nodeId: _drop, ...rest } = m as AgentMessage & { nodeId?: string }
+      return rest as AgentMessage
+    })
+    out.push(...msgs)
   }
   return out
 }

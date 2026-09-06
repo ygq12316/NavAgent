@@ -4,43 +4,76 @@ import { FitAddon } from '@xterm/addon-fit'
 import { getApi } from '../api'
 import { IconPlus } from './icons'
 
-interface Tab {
-  id: string
-  label: string
+interface Props {
+  sessionId: string
+  /** 存活的 PTY id（AppState.ptys；pane 重开后回放环形缓冲） */
+  ptys: string[]
+  onCreated: (id: string) => void
+  onClosed: (id: string) => void
 }
 
-/** 单例窗口内多终端标签；inactive 标签保持挂载（display:none）以不丢滚动缓冲 */
-export function TerminalWindow() {
-  const [tabs, setTabs] = useState<Tab[]>([])
+/** 会话内多终端标签（cwd = 会话工作区）；pane 关闭后 PTY 继续运行，重开时 ptyReplay 回放。
+ *  agent 的 bash 命令也在这套 PTY 里执行——面板里能直接看到 agent 在跑什么。 */
+export function TerminalWindow({ sessionId, ptys, onCreated, onClosed }: Props) {
   const [active, setActive] = useState<string | null>(null)
   const [spawnError, setSpawnError] = useState(false)
+  // 自动创建超过 8 秒仍未成功 = 异常（正常 <2s）：给出明确的重试入口而不是无限等待
+  const [stuckMs, setStuckMs] = useState(0)
+  useEffect(() => {
+    if (ptys.length > 0 || spawnError) return
+    const t0 = Date.now()
+    const iv = window.setInterval(() => setStuckMs(Date.now() - t0), 500)
+    return () => window.clearInterval(iv)
+  }, [ptys.length, spawnError])
+  const stuck = !spawnError && ptys.length === 0 && stuckMs > 8000
   const hosts = useRef(new Map<string, HTMLDivElement>())
   const terms = useRef(new Map<string, { term: Terminal; fit: FitAddon }>())
-  const seq = useRef(0)
 
   const spawn = async (): Promise<void> => {
-    const id = await getApi().ptyCreate()
+    // invoke 可能 reject（channel 缺失/主进程异常）——吞掉会让 UI 永远停在"正在创建终端…"，必须落到错误态
+    let id: string | null = null
+    try {
+      id = await getApi().ptyCreate(sessionId)
+    } catch {
+      id = null
+    }
     if (!id) {
       setSpawnError(true)
       return
     }
     setSpawnError(false)
-    seq.current += 1
-    setTabs((t) => [...t, { id, label: `pwsh ${seq.current}` }])
+    onCreated(id)
     setActive(id)
   }
 
-  // 订阅 PTY 输出 → 写入对应 xterm（组件生命周期只挂一次）
+  // 打开面板即认领 main 侧预热好的终端（session:load 时已预创建）：tab 与回放内容点击即得
+  const adoptedFor = useRef<string | null>(null)
+  useEffect(() => {
+    if (adoptedFor.current === sessionId) return
+    adoptedFor.current = sessionId
+    void getApi()
+      .ptyList(sessionId)
+      .then((ids) => {
+        if (ids.length === 0) return
+        for (const id of ids) if (!ptys.includes(id)) onCreated(id)
+        setActive((cur) => cur ?? ids[0]!)
+      })
+      .catch(() => undefined)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId])
+
+  // 订阅本会话 PTY 输出（组件生命周期只挂一次）
   useEffect(() => {
     return getApi().onUiEvent((e) => {
+      if (e.sessionId !== sessionId) return
       if (e.type === 'pty_data') terms.current.get(e.id)?.term.write(e.chunk)
       if (e.type === 'pty_exit') {
         terms.current.get(e.id)?.term.write(`\r\n\x1b[90m[进程已退出，exitCode=${e.exitCode}]\r\n`)
       }
     })
-  }, [])
+  }, [sessionId])
 
-  // active 标签创建 xterm（每个 id 只建一次）
+  // active 标签创建 xterm（每个 id 只建一次；重开回放环形缓冲）
   useEffect(() => {
     if (!active) return
     const host = hosts.current.get(active)
@@ -52,13 +85,16 @@ export function TerminalWindow() {
       theme: {
         background: '#00000000',
         foreground: getComputedStyle(document.documentElement).getPropertyValue('--tx').trim() || '#33312c',
-        cursor: '#2383e2'
+        cursor: '#7f9c8b'
       }
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(host)
     fit.fit()
+    void getApi().ptyReplay(active).then((buf) => {
+      if (buf) term.write(buf)
+    })
     term.onData((data) => void getApi().ptyWrite(active, data))
     terms.current.set(active, { term, fit })
     const ro = new ResizeObserver(() => {
@@ -74,36 +110,32 @@ export function TerminalWindow() {
       ro.disconnect()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, tabs.length])
+  }, [active, ptys.length])
 
   const closeTab = (id: string) => {
     void getApi().ptyKill(id)
     terms.current.get(id)?.term.dispose()
     terms.current.delete(id)
-    setTabs((t) => {
-      const next = t.filter((x) => x.id !== id)
-      if (active === id) setActive(next[next.length - 1]?.id ?? null)
-      return next
-    })
+    onClosed(id)
+    setActive((cur) => (cur === id ? ptys.filter((x) => x !== id).at(-1) ?? null : cur))
   }
 
-  if (spawnError && tabs.length === 0) {
-    return (
-      <div className="term-notice">
-        终端不可用（需要 Electron 环境 / PTY 启动失败）。
-        <br />
-        <button className="btn" onClick={() => void spawn()}>重试</button>
-      </div>
-    )
-  }
+  // 换会话时清理本组件创建的 xterm 实例（PTY 不动）
+  useEffect(() => {
+    const map = terms.current
+    return () => {
+      for (const t of map.values()) t.term.dispose()
+      map.clear()
+    }
+  }, [sessionId])
 
   return (
     <>
       <div className="term-tabs">
-        {tabs.map((t) => (
-          <div key={t.id} className={`term-tab${t.id === active ? ' on' : ''}`} onClick={() => setActive(t.id)}>
-            <span>{t.label}</span>
-            <button className="tab-close" title="关闭此终端" onClick={(e) => { e.stopPropagation(); closeTab(t.id) }}>
+        {ptys.map((id, i) => (
+          <div key={id} className={`term-tab${id === active ? ' on' : ''}`} onClick={() => setActive(id)}>
+            <span>终端 {i + 1}</span>
+            <button className="tab-close" title="关闭此终端" onClick={(e) => { e.stopPropagation(); closeTab(id) }}>
               ✕
             </button>
           </div>
@@ -113,32 +145,50 @@ export function TerminalWindow() {
         </button>
       </div>
       <div className="term-host">
-        {tabs.map((t) => (
+        {ptys.map((id) => (
           <div
-            key={t.id}
+            key={id}
             ref={(el) => {
-              if (el) hosts.current.set(t.id, el)
-              else hosts.current.delete(t.id)
+              if (el) hosts.current.set(id, el)
+              else hosts.current.delete(id)
             }}
-            className={`term-pane${t.id === active ? '' : ' off'}`}
+            className={`term-pane${id === active ? '' : ' off'}`}
           />
         ))}
-        {tabs.length === 0 && <div className="term-notice">尚无终端</div>}
+        {ptys.length === 0 && (
+          <div className="term-notice">
+            {spawnError ? '终端创建失败，请点击重试。' : stuck ? '终端创建超时——请完整重启应用（Ctrl+C 后重新 pnpm dev）。' : '正在创建终端…'}
+            {(stuck || spawnError) && (
+              <button className="btn" onClick={() => void spawn()}>重试</button>
+            )}
+          </div>
+        )}
       </div>
-      {/* 首次打开自动建一个终端 */}
-      <AutoSpawnOnce onSpawn={() => void spawn()} hasTabs={tabs.length > 0} />
+      {/* 打开面板自动建一个终端（延迟 1.2s 避开启动期 conpty 竞态；主进程侧创建入口互斥） */}
+      <AutoSpawnOnce onSpawn={() => void spawn()} hasTabs={ptys.length > 0} />
     </>
   )
 }
 
 function AutoSpawnOnce({ onSpawn, hasTabs }: { onSpawn: () => void; hasTabs: boolean }) {
   const done = useRef(false)
+  const spawnRef = useRef(onSpawn)
+  spawnRef.current = onSpawn
+  // 认领/预热可能异步落地：触发瞬间重读最新 hasTabs，避免给已有 tab 的会话重复开终端
+  const hasTabsRef = useRef(hasTabs)
+  hasTabsRef.current = hasTabs
   useEffect(() => {
-    if (!done.current && !hasTabs) {
+    if (hasTabsRef.current) {
       done.current = true
-      onSpawn()
+      return
     }
-    if (hasTabs) done.current = true
-  }, [hasTabs, onSpawn])
+    const t = window.setTimeout(() => {
+      if (!hasTabsRef.current && !done.current) {
+        done.current = true
+        spawnRef.current()
+      }
+    }, 1200)
+    return () => window.clearTimeout(t)
+  }, [])
   return null
 }
