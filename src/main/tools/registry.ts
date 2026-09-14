@@ -3,8 +3,11 @@ import type { ToolSchema } from '@shared/types'
 
 export interface ToolContext {
   workspacePath: string
-  /** 会话终端执行器：agent bash 在「点出来的」可见 PTY 终端里执行（无终端环境时缺省，回落隐藏 shell） */
-  terminal?: { exec: (command: string, timeoutMs: number, signal: AbortSignal) => Promise<ToolResult> }
+  /** 会话终端执行器：agent bash 在「点出来的」可见 PTY 终端里执行（无终端环境时缺省，回落隐藏 shell）。
+   *  opts.waitExit=false（interactive 长驻命令）：观察窗到点返回"仍在运行"，不终止终端里的进程 */
+  terminal?: {
+    exec: (command: string, timeoutMs: number, signal: AbortSignal, opts?: { waitExit?: boolean }) => Promise<ToolResult>
+  }
 }
 
 export interface ToolResult {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
@@ -7,6 +7,18 @@ import type { PermissionDecision, ThinkingContent } from '@shared/types'
 import { ToolBlock } from './ToolBlock'
 import { CodeBlock } from './CodeBlock'
 import { IconAlert, IconArrowCounterClockwise, IconChevronDown, IconCopy, IconFile, IconGitFork, IconLightbulb } from './icons'
+
+/** 历史/流式文本块的 markdown 渲染 memo 化：text 不变即跳过重解析——
+ *  流式期间只有尾块变化重跑 ReactMarkdown，历史块（占绝大多数）零成本（渲染风暴的 CPU 大头） */
+const AssistantMarkdown = memo(function AssistantMarkdown({ text }: { text: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={{ pre: CodeBlock }}>
+      {text}
+    </ReactMarkdown>
+  )
+})
+
+const ThinkingPanelMemo = memo(ThinkingPanel)
 
 /** 思考过程：与工具块同族的左规线行；流式期间自动展开显示「思考中」，结束后自动收起 */
 function ThinkingPanel({ block, streaming }: { block: ThinkingContent; streaming: boolean }) {
@@ -64,9 +76,14 @@ export function Transcript({ state, sessionId, viewMode = 'normal', onChip, perm
   const ref = useRef<HTMLDivElement>(null)
   const [pinned, setPinned] = useState(true)
 
+  // 自动滚底：rAF 批处理（流式期间每帧至多一次强制回流，不再每渲染一次）
   useEffect(() => {
-    const el = ref.current
-    if (el && pinned) el.scrollTop = el.scrollHeight
+    if (!pinned) return
+    const raf = requestAnimationFrame(() => {
+      const el = ref.current
+      if (el) el.scrollTop = el.scrollHeight
+    })
+    return () => cancelAnimationFrame(raf)
   })
 
   const onScroll = () => {
@@ -151,14 +168,12 @@ export function Transcript({ state, sessionId, viewMode = 'normal', onChip, perm
                       blk.type === 'text' ? (
                         blk.text ? (
                           <div key={j} className={`assistant-text md${b.streaming && j === b.blocks.length - 1 ? ' streaming' : ''}`}>
-                            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={{ pre: CodeBlock }}>
-                              {blk.text}
-                            </ReactMarkdown>
+                            <AssistantMarkdown text={blk.text} />
                             {b.streaming && j === b.blocks.length - 1 && <span className="caret-blink" />}
                           </div>
                         ) : null
                       ) : viewMode === 'summary' ? null : (
-                        <ThinkingPanel key={j} block={blk} streaming={b.streaming && j === b.blocks.length - 1} />
+                        <ThinkingPanelMemo key={j} block={blk} streaming={b.streaming && j === b.blocks.length - 1} />
                       )
                     )}
                     {b.toolCalls.map((tool) => (
@@ -207,6 +222,9 @@ export function Transcript({ state, sessionId, viewMode = 'normal', onChip, perm
 function PermissionPrompt({ permission, onRespond }: { permission: PermissionVM; onRespond: (d: PermissionDecision) => void }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // 焦点在输入框时数字键是正文，不做权限快捷应答
+      const tag = (document.activeElement?.tagName ?? '').toLowerCase()
+      if (tag === 'input' || tag === 'textarea') return
       if (e.key === '1') onRespond('approve')
       else if (e.key === '2') onRespond('always')
       else if (e.key === '3') onRespond('deny')

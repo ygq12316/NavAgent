@@ -1,4 +1,4 @@
-import { BrowserWindow, Menu, app, protocol } from 'electron'
+import { BrowserWindow, Menu, app, dialog, protocol } from 'electron'
 import { extname, join, resolve } from 'node:path'
 import type { AgentMessage, AgentEvent, CustomProviderFull, StopReason } from '@shared/types'
 import type { ApiConfig, ContextBreakdown, ContextSection, ContextMessageShare } from '@shared/types'
@@ -20,6 +20,7 @@ import { DiffService } from './services/diff'
 import { getConfig } from './config'
 import { emitAgentEvent, emitUiEvent, registerIpc } from './ipc'
 import { TerminalService } from './services/terminal'
+import { McpHost } from './services/mcp'
 import { COMPACTION_SYSTEM } from './agent/context'
 import { extractFileOperations, formatFileOperations, serializeConversation } from './agent/compaction'
 import { BRANCH_SUMMARIZATION_PROMPT } from './agent/branch'
@@ -32,7 +33,8 @@ import { buildContextFilesSection } from './agent/context-files'
 import { PermissionManager } from './permissions'
 import { AnthropicProvider } from './providers/anthropic'
 import { OpenAICompatProvider } from './providers/openai-compat'
-import { assembleTools, toolInfos, type ToolInfo } from './tools/assemble'
+import { assembleTools, toolInfos, webToolPlaceholders, webToolsOf } from './tools/assemble'
+import type { ToolInfo } from '@shared/types'
 import type { ToolCallInterceptor } from './extensions/types'
 import type { ExtensionCommand } from './extensions/types'
 import type { ExtensionContext, ExtensionEventName, ExtensionHandlerEntry, ExtensionUi, StateStore, ToolResultInterceptor } from './extensions/types'
@@ -59,6 +61,9 @@ protocol.registerSchemesAsPrivileged([
 
 // 单实例锁：sessions.db 按"单写者 = main 进程"设计，双实例并发会触发 WAL disk I/O error（重启竞态/手动双开都会撞上）
 if (!app.requestSingleInstanceLock()) {
+  // 拿不到锁 = 已有一个实例（可能是未完全退出的僵尸）。必须可见地告知——
+  // 否则新实例静默退出、旧实例把旧窗口弹回前台，用户会误以为"重启了"却一直在用旧代码
+  dialog.showErrorBox('navAgent 已在运行', '已有一个 navAgent 实例在运行（可能是未完全退出的旧实例）。\n\n请先结束它：任务管理器 → 结束 electron.exe 进程，\n或关闭对应的 navAgent 窗口后再启动。')
   app.quit()
 }
 app.on('second-instance', () => {
@@ -302,7 +307,13 @@ app.whenReady().then(() => {
       ...(c.workspacePath ? [{ dir: join(c.workspacePath, '.navagent', 'skills'), source: 'project' as const }] : [])
     ])
     const skillTool = skillsCache.length > 0 ? [buildSkillTool(() => skillsCache)] : []
-    const next = assembleTools([...BUILTIN_TOOLS, ...skillTool], result.tools, c)
+    // MCP 工具（mcp_<server>_<tool>；mutating 走审批门）——必须在 assembleTools 之前刷新
+    const mcpRes = await mcp.refresh()
+    for (const st of mcpRes.statuses) {
+      if (st.status === 'error') emitAgentEvent('', { type: 'notice', message: `MCP 服务器 ${st.name} 启动失败：${st.error ?? '?'}` })
+    }
+    lastMcpTools = mcpRes.tools.map((t) => mcp.toRegistryTool(t.server, t))
+    const next = assembleTools([...BUILTIN_TOOLS, ...skillTool, ...webToolsOf(c)], [...result.tools, ...lastMcpTools], c)
     activeTools.length = 0
     activeTools.push(...next)
     // models.json 用户级供应商（凭据值语法在 pickProvider 请求时解析）
@@ -311,12 +322,20 @@ app.whenReady().then(() => {
     for (const e of mp.errors) emitAgentEvent('', { type: 'notice', message: `供应商配置：${e}` })
     for (const e of result.errors) emitAgentEvent('', { type: 'notice', message: `扩展加载失败：${e}` })
   }
+  let lastMcpTools: Tool<any>[] = []
   let lastExtensionTools: Tool<any>[] = []
   let lastExtensionInfos: ExtensionInfo[] = []
   let extensionInterceptors: ToolCallInterceptor[] = []
   let extensionHandlers: ExtensionHandlerEntry[] = []
   let skillsCache: SkillMeta[] = []
-  const listToolInfos = (): ToolInfo[] => toolInfos(BUILTIN_TOOLS, lastExtensionTools, getConfig())
+  const listToolInfos = (): ToolInfo[] => {
+    const cfg = getConfig()
+    const web = webToolsOf(cfg)
+    const infos = toolInfos([...BUILTIN_TOOLS, ...web], [...lastExtensionTools, ...lastMcpTools], cfg)
+    // 条件注册的工具在未配置时也要可见（否则设置里找不到、不知道要去配 key）
+    if (web.length === 0) infos.push(...webToolPlaceholders('需要在「通用」设置 Tavily Key 后启用（tavily.com 免费注册）'))
+    return infos
+  }
 
   // ── context files 缓存（同步 getSystemPrompt 的取数来源；取默认项目根，worktree 镜像同内容）──
   let contextFilesCache = ''
@@ -350,10 +369,38 @@ app.whenReady().then(() => {
 
   // Diff 服务：git 会话走 git diff；非 git 会话靠引擎钩子抓写类工具前后内容
   const diffs = new DiffService(workspaceOf, readWorkspaceFile)
+  /** MCP（Model Context Protocol）：stdio JSON-RPC 拉起本地服务器，工具注册为 mcp_<server>_<tool> */
+  const mcp = new McpHost(app.getPath('userData'))
 
-  // 持久化包装（每会话一份闭包）：事件转发窗口（信封）+ JSONL（message_update 过重不落盘，消息以 message_end 为准）
+  // 持久化包装（每会话一份闭包）：事件转发窗口（信封）+ JSONL（message_update 过重不落盘，消息以 message_end 为准）。
+  // message_update 节流：每个 SSE delta 一帧全量快照会把 IPC+渲染放大成 O(n²)（流式卡顿/输入吞键的根因）——
+  // 每会话 ~100ms 合并为一帧；message_end 自带完整消息，节流中未发出的中间帧直接丢弃。
+  const pendingUpdates = new Map<string, { timer: ReturnType<typeof setTimeout>; event: AgentEvent }>()
   const emitFor = (sessionId: string) => (event: AgentEvent): void => {
+    if (event.type === 'message_update') {
+      const pending = pendingUpdates.get(sessionId)
+      if (pending) {
+        pending.event = event
+        return
+      }
+      pendingUpdates.set(sessionId, {
+        timer: setTimeout(() => {
+          const p = pendingUpdates.get(sessionId)
+          if (!p) return
+          pendingUpdates.delete(sessionId)
+          emitAgentEvent(sessionId, p.event)
+          if (jsonModeEnabled) process.stdout.write(JSON.stringify(p.event) + '\n')
+        }, 100),
+        event
+      })
+      return
+    }
     if (event.type === 'message_end') {
+      const pending = pendingUpdates.get(sessionId)
+      if (pending) {
+        clearTimeout(pending.timer)
+        pendingUpdates.delete(sessionId)
+      }
       if (event.message.role === 'user') store.ensureTitle(sessionId, messageText(event.message))
       // 落盘并取节点 id：live 信封携带 nodeId，renderer 即可对消息 rewind/fork
       const nodeId = store.appendMessage(sessionId, event.message)
@@ -361,7 +408,7 @@ app.whenReady().then(() => {
     }
     emitAgentEvent(sessionId, event)
     if (jsonModeEnabled) process.stdout.write(JSON.stringify(event) + '\n')
-    if (event.type !== 'message_update') store.appendEvent(sessionId, event)
+    store.appendEvent(sessionId, event)
   }
 
   /** 会话运行时工厂：每会话私有 emit / PermissionManager / Agent（并行互不串扰） */
@@ -440,10 +487,10 @@ app.whenReady().then(() => {
       getWorkspacePath: () => workspaceOf(sessionId),
       /** agent bash 在会话的可见终端（PTY）里执行：无存活终端时自动创建，pane 关闭不中断 */
       terminal: {
-        exec: async (command: string, timeoutMs: number, signal: AbortSignal): Promise<ToolResult> => {
+        exec: async (command: string, timeoutMs: number, signal: AbortSignal, opts?: { waitExit?: boolean }): Promise<ToolResult> => {
           const id = await terminals.ensure(sessionId, workspaceOf(sessionId))
           if (!id) return { content: '（终端不可用：PTY 创建失败）', isError: true }
-          return terminals.execInPty(id, command, timeoutMs, signal)
+          return terminals.execInPty(id, command, timeoutMs, signal, opts)
         }
       },
       permissions: pm,
@@ -607,7 +654,8 @@ app.whenReady().then(() => {
         '- 读取文件用 read_file；执行命令用 bash（会请求用户批准）。',
         '- 用用户的语言回答；完成任务后给出简短总结。',
         '- 不要在回复中使用 emoji 或装饰性符号（如 📂💻✨🔥）：界面已有图标体系，回复一律用纯文本 Markdown 表达。',
-        '- 需要某个已安装技能的详细指令时，调用 skill 工具加载。'
+        '- 需要某个已安装技能的详细指令时，调用 skill 工具加载。',
+        '- 需要联网查资料、查最新文档或版本信息时，用 web_search 搜索、web_fetch 读取网页全文（未配置时调用会得到明确提示）。'
       ].join('\n') +
       contextFilesCache +
       buildSkillsSection(skillsCache) +
@@ -782,6 +830,7 @@ app.whenReady().then(() => {
     ops: sessionOps,
     listModels: listVendorModels,
     listExtensions: () => lastExtensionInfos,
+    mcp,
     ensureSessionWorkspace,
     workspaceOf,
     store,

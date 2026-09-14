@@ -1083,6 +1083,19 @@ pnpm test         # vitest run
     return this.demoExts.map((e) => ({ ...e, tools: [...e.tools], commands: [...e.commands] }))
   }
 
+  async mcpList(): Promise<{ statuses: import('@shared/types').McpServerStatus[]; config: import('@shared/types').McpConfig }> {
+    return { statuses: [], config: {} }
+  }
+  async mcpSave(_name: string, _def: import('@shared/types').McpServerDef): Promise<{ ok: boolean; error?: string; id?: string }> {
+    return { ok: false, error: '演示模式不支持 MCP' }
+  }
+  async mcpRemove(_name: string): Promise<'ok'> {
+    return 'ok'
+  }
+  async mcpSetEnabled(_name: string, _enabled: boolean): Promise<'ok'> {
+    return 'ok'
+  }
+
   async installExtension(): Promise<ExtensionOpResult> {
     return { ok: false, canceled: true, extensions: this.listExtensionsSync() }
   }

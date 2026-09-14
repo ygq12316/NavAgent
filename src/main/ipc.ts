@@ -99,7 +99,7 @@ export function registerIpc(deps: {
   refreshTools: () => Promise<void>
   isTrusted: (ws: string) => boolean
   trustRuntime: (ws: string) => void
-  listToolInfos: () => import('./tools/assemble').ToolInfo[]
+  listToolInfos: () => import('@shared/types').ToolInfo[]
   /** 工作区 context files 缓存重建（启动/config:set/手动刷新） */
   refreshContextFiles: () => void
   /** 终端服务（Terminal pane 的 PTY 后端；index.ts 注入） */
@@ -124,6 +124,8 @@ export function registerIpc(deps: {
   describeCredential: (providerId: string) => string | null
   /** 已加载扩展清单（refreshTools 时的 loader infos 缓存） */
   listExtensions: () => import('@shared/types').ExtensionInfo[]
+  /** MCP 宿主（userData/mcp.json 的服务器生命周期与工具） */
+  mcp: import('./services/mcp').McpHost
   /** 扩展面板宿主（panel:invoke/panel:close 桥的后端；index.ts 注入） */
   panels: import('./extensions/panels').PanelManager
   /** 会话扩展 ctx 工厂（命令分发与面板桥共用；index.ts 注入） */
@@ -504,7 +506,6 @@ export function registerIpc(deps: {
 
   ipcMain.handle('pty:create', (_e, sessionId: string): string | null => {
     const sid = String(sessionId ?? '')
-    console.error('[term-diag] pty:create handler enter, sid =', sid)
     return terminals.create(workspaceOf(sid) || app.getPath('home'), sid)
   })
   ipcMain.handle('pty:replay', (_e, id: string): string => terminals.replay(String(id ?? '')))
@@ -554,6 +555,33 @@ export function registerIpc(deps: {
   // ── 扩展管理：清单 / 安装（全局目录）/ 删除（仅全局）/ 启停 ──
 
   ipcMain.handle('extensions:list', () => deps.listExtensions())
+
+  // ── MCP 服务（stdio JSON-RPC；配置 userData/mcp.json，工具注册为 mcp_<server>_<tool>）──
+
+  ipcMain.handle('mcp:list', async () => {
+    const { tools, statuses } = await deps.mcp.refresh()
+    return { statuses, config: deps.mcp.loadConfig(), toolCount: tools.length }
+  })
+  ipcMain.handle('mcp:save', async (_e, name: string, def: import('@shared/types').McpServerDef) => {
+    const r = deps.mcp.upsert(String(name ?? ''), {
+      command: String(def?.command ?? ''),
+      args: Array.isArray(def?.args) ? def.args.map(String) : undefined,
+      env: def?.env && typeof def.env === 'object' ? def.env : undefined,
+      enabled: def?.enabled !== false
+    })
+    if (r.ok) await deps.refreshTools()
+    return r
+  })
+  ipcMain.handle('mcp:remove', async (_e, name: string) => {
+    deps.mcp.remove(String(name ?? ''))
+    await deps.refreshTools()
+    return 'ok' as const
+  })
+  ipcMain.handle('mcp:setEnabled', async (_e, name: string, enabled: boolean) => {
+    deps.mcp.setEnabled(String(name ?? ''), enabled === true)
+    await deps.refreshTools()
+    return 'ok' as const
+  })
 
   ipcMain.handle('extensions:install', async (): Promise<ExtensionOpResult> => {
     const fail = (error: string, canceled = false): ExtensionOpResult => ({ ok: false, ...(canceled ? { canceled } : { error }), extensions: deps.listExtensions() })

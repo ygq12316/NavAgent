@@ -28,10 +28,8 @@ export class TerminalService {
   }
 
   create(cwd: string, sessionId: string): string | null {
-    console.error('[term-diag] create enter, spawning =', this.spawning)
     if (this.spawning) return null
     this.spawning = true
-    const t0 = Date.now()
     try {
       const isWin = process.platform === 'win32'
       const shell = isWin ? 'powershell.exe' : (process.env.SHELL ?? '/bin/bash')
@@ -63,10 +61,8 @@ export class TerminalService {
         this.emit({ type: 'pty_exit', id, sessionId, exitCode })
       })
       this.terms.set(id, term)
-      console.error('[term-diag] spawn ok in', Date.now() - t0, 'ms')
       return id
-    } catch (err) {
-      console.error('[term-diag] spawn threw:', err instanceof Error ? err.message : err)
+    } catch {
       return null
     } finally {
       this.spawning = false
@@ -175,8 +171,11 @@ export class TerminalService {
 
   /** 在指定 PTY 里执行命令（agent bash 调用点出来的终端）：
    *  先等 shell 就绪；标记与命令拼在同一行（PSReadLine 会吞掉快速连发的第二行），
-   *  捕获流直到出现展开后的标记（含退出码）。超时/中止发 Ctrl+C。永不 throw。 */
-  async execInPty(id: string, command: string, timeoutMs: number, signal: AbortSignal): Promise<ToolResult> {
+   *  捕获流直到出现展开后的标记（含退出码）。超时/中止发 Ctrl+C。永不 throw。
+   *  opts.waitExit=false（interactive 长驻命令）：观察窗到点即返回"仍在运行"，
+   *  不发 Ctrl+C——命令（dev server 等）在终端里继续跑，快命令仍会提前经标记返回。 */
+  async execInPty(id: string, command: string, timeoutMs: number, signal: AbortSignal, opts: { waitExit?: boolean } = {}): Promise<ToolResult> {
+    const waitExit = opts.waitExit !== false
     const term = this.terms.get(id)
     const shell = this.shells.get(id) ?? 'bash'
     if (!term) return { content: '（终端已退出，无法执行）', isError: true }
@@ -217,7 +216,19 @@ export class TerminalService {
         cleanup()
         resolve(this.shapeExecResult(captured.join(''), MARK, null, note, command))
       }
+      /** 长驻进程观察窗结束：不等待退出、不终止命令——已有输出交给模型，进程留在终端里继续跑 */
+      const finishLongRun = (): void => {
+        if (settled) return
+        settled = true
+        cleanup()
+        const shaped = this.shapeExecResult(captured.join(''), MARK, null, '', command)
+        resolve({ content: `${shaped.content}\n（命令仍在终端中运行——长驻进程不等待结束；输出与停止请看终端面板）` })
+      }
       const timer = setTimeout(() => {
+        if (!waitExit) {
+          finishLongRun()
+          return
+        }
         try {
           term.write('\x03\x03')
         } catch {

@@ -3323,6 +3323,15 @@ select {
   font-size: var(--text-sm);
   color: var(--tx);
 }
+.tool-hint {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--tx3);
+}
 .mut-badge {
   flex-shrink: 0;
   padding: 0 5px;

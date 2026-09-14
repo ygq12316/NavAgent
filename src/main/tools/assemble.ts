@@ -1,11 +1,19 @@
-import type { ApiConfig } from '@shared/types'
+import type { ApiConfig, ToolInfo } from '@shared/types'
 import type { Tool } from './registry'
+import { webSearchTool } from './builtin/web-search'
+import { webFetchTool } from './builtin/web-fetch'
 
-export interface ToolInfo {
-  name: string
-  source: 'builtin' | 'extension'
-  mutating: boolean
-  enabled: boolean
+/** 联网工具（web_search/web_fetch）：仅在配置了搜索后端时注册（skill 工具同款条件注册先例） */
+export function webToolsOf(config: ApiConfig): Tool<any>[] {
+  return config.webSearch?.apiKey ? [webSearchTool, webFetchTool] : []
+}
+
+/** 未配置时的占位条目（设置面板可见性：hint 非空 = 开关无效） */
+export function webToolPlaceholders(hint: string): ToolInfo[] {
+  return [
+    { name: webSearchTool.name, source: 'builtin', mutating: false, enabled: false, hint },
+    { name: webFetchTool.name, source: 'builtin', mutating: false, enabled: false, hint }
+  ]
 }
 
 /**

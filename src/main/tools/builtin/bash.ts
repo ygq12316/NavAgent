@@ -24,7 +24,7 @@ export const bashTool: Tool<Args> = {
     type: 'object',
     properties: {
       command: { type: 'string', description: '要执行的命令' },
-      timeout_ms: { type: 'number', description: '超时毫秒数，默认 120000，最大 600000' },
+      timeout_ms: { type: 'number', description: '超时毫秒数，默认 120000，最大 600000；interactive 时为观察窗时长（到时返回"仍在运行"，上限 15 秒）' },
       interactive: {
         type: 'boolean',
         description:
@@ -38,8 +38,14 @@ export const bashTool: Tool<Args> = {
   async execute(args, ctx, signal) {
     const timeout = Math.min(Math.max(args.timeout_ms ?? 120_000, 1_000), 600_000)
     // 可见终端优先：命令在会话「点出来的」PTY 终端里执行（标记协议捕获输出）；
-    // 无终端环境（web 预览/测试）回落隐藏 shell
-    if (ctx.terminal) return ctx.terminal.exec(args.command, timeout, signal)
+    // 无终端环境（web 预览/测试）回落隐藏 shell。
+    // interactive（dev server/watch 等长驻命令）：观察窗模式——窗口到点返回"仍在运行"并附带已有输出，
+    // 不发 Ctrl+C、不阻塞回合；进程留在终端里继续跑，快命令仍会提前经标记返回真实退出码。
+    if (ctx.terminal) {
+      const waitExit = args.interactive !== true
+      const wait = waitExit ? timeout : Math.min(timeout, 15_000)
+      return ctx.terminal.exec(args.command, wait, signal, { waitExit })
+    }
     return new Promise((resolve) => {
       const child = spawn('cmd.exe', ['/d', '/s', '/c', args.command], {
         cwd: ctx.workspacePath,

@@ -241,6 +241,28 @@ export interface SessionTreeNode {
   preview: string
 }
 
+/** MCP（Model Context Protocol）服务器定义：stdio JSON-RPC 拉起本地进程 */
+export interface McpServerDef {
+  command: string
+  args?: string[]
+  env?: Record<string, string>
+  enabled?: boolean
+}
+
+export interface McpConfig {
+  servers?: Record<string, McpServerDef>
+}
+
+export type McpServerState = 'ready' | 'error' | 'disabled'
+
+export interface McpServerStatus {
+  name: string
+  status: McpServerState
+  error?: string
+  tools?: number
+  command?: string
+}
+
 /** 全文检索命中（SQLite nodes.txt 派生列，LIKE 子串匹配） */
 export interface SessionSearchHit {
   sessionId: string
@@ -260,6 +282,8 @@ export interface ToolInfo {
   source: 'builtin' | 'extension'
   mutating: boolean
   enabled: boolean
+  /** 条件注册工具未就绪时的指引（如 web_search 未配 key）；非空 = 开关无效 */
+  hint?: string
 }
 
 export interface CommandInfo {
@@ -329,6 +353,14 @@ export interface ApiConfig {
   defaultPermissionMode?: PermissionMode
   /** AI 回答中发送新消息时是否追加为续跑（默认开启，CC 对齐） */
   appendWhileRunning?: boolean
+  /** 联网搜索（web_search/web_fetch 的后端）；缺省 = 不注册这两个工具 */
+  webSearch?: WebSearchConfig
+}
+
+/** 联网搜索配置：provider 决定后端实现（当前 tavily；key 为空 = 未配置） */
+export interface WebSearchConfig {
+  provider: 'tavily'
+  apiKey: string
 }
 
 export interface ParsedCommand {
@@ -482,6 +514,14 @@ export interface NavAgentApi {
   reloadExtensions(): Promise<ReloadResult>
   /** 已加载扩展清单（manifest 元数据 + 工具/命令计数 + 加载错误） */
   listExtensions(): Promise<ExtensionInfo[]>
+  /** MCP 服务：状态清单（ready/error/disabled + 工具数）与当前配置 */
+  mcpList(): Promise<{ statuses: McpServerStatus[]; config: McpConfig }>
+  /** 新增/覆盖 MCP 服务器（写 userData/mcp.json 并刷新工具） */
+  mcpSave(name: string, def: McpServerDef): Promise<{ ok: boolean; error?: string; id?: string }>
+  /** 删除 MCP 服务器并停进程 */
+  mcpRemove(name: string): Promise<'ok'>
+  /** 启停 MCP 服务器（禁用即停进程） */
+  mcpSetEnabled(name: string, enabled: boolean): Promise<'ok'>
   /** 选择文件夹安装到全局扩展目录；用户取消返回 ok:false + cancel 标记 */
   installExtension(): Promise<ExtensionOpResult>
   /** 删除扩展（仅全局目录可删） */

@@ -486,6 +486,8 @@ export function Composer(p: Props) {
                   return
                 }
               }
+              // IME 组字中：Enter 是选词确认，不是发送（keyCode 229 = 组字中的键事件）
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return
               if (e.key === 'Enter' && e.altKey) {
                 e.preventDefault()
                 maybeFollowUp()

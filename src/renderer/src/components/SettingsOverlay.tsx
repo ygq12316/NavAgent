@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { ApiConfig, CatalogSnapshot, CredentialInfo, CustomProviderFull, CustomProviderWriteResult, ExtensionInfo, ToolInfo } from '@shared/types'
+import type { ApiConfig, CatalogSnapshot, CredentialInfo, CustomProviderFull, CustomProviderWriteResult, ExtensionInfo, McpServerDef, McpServerStatus, ToolInfo } from '@shared/types'
 import { registerExtraCatalog } from '@shared/model-catalog'
 import { getApi } from '../api'
 import { useOutsideClose } from './dock/WindowFrame'
@@ -15,11 +15,12 @@ interface Props {
 }
 
 /** 设置分区（对标 CC 桌面端：左侧导航 + 右侧内容 + 底部操作条） */
-type TabId = 'providers' | 'tools' | 'general'
+type TabId = 'providers' | 'tools' | 'mcp' | 'general'
 
 const TABS: { id: TabId; label: string; icon: typeof IconPlug }[] = [
   { id: 'providers', label: '模型供应商', icon: IconPlug },
   { id: 'tools', label: '工具与扩展', icon: IconWrench },
+  { id: 'mcp', label: 'MCP 服务', icon: IconPlug },
   { id: 'general', label: '通用', icon: IconHouse }
 ]
 
@@ -48,11 +49,18 @@ export function SettingsOverlay({ config, onSave, onConfigChange, onClose, onPic
   const [baseUrl, setBaseUrl] = useState(config.baseUrl)
   const [model, setModel] = useState(config.model)
   const [contextWindow] = useState(config.contextWindow?.toString() ?? '')
+  /** 联网搜索（web_search/web_fetch 后端）；key 为空 = 不注册这两个工具 */
+  const [webSearchKey, setWebSearchKey] = useState(config.webSearch?.apiKey ?? '')
   const [tools, setTools] = useState<ToolInfo[]>([])
   const [extHint, setExtHint] = useState<string | null>(null)
   /** 已加载扩展（设置页扩展卡片） */
   const [exts, setExts] = useState<ExtensionInfo[]>([])
   const [extBusy, setExtBusy] = useState(false)
+  // ── MCP 服务（stdio JSON-RPC；配置 userData/mcp.json）──
+  const [mcpStatuses, setMcpStatuses] = useState<McpServerStatus[]>([])
+  const [mcpForm, setMcpForm] = useState<{ name: string; command: string; env: string }>({ name: '', command: '', env: '' })
+  const [mcpBusy, setMcpBusy] = useState(false)
+  const [mcpHint, setMcpHint] = useState<string | null>(null)
   // 供应商目录（内置 + models.json 自定义）与凭据状态
   const [catalog, setCatalog] = useState<CatalogSnapshot | null>(null)
   const [creds, setCreds] = useState<CredentialInfo[]>([])
@@ -99,6 +107,55 @@ export function SettingsOverlay({ config, onSave, onConfigChange, onClose, onPic
     setTools([...(await getApi().listTools())].sort((a, b) => a.source.localeCompare(b.source) || a.name.localeCompare(b.name)))
   }
 
+  // ── MCP 服务 ──
+  const loadMcp = async (): Promise<void> => {
+    const r = await getApi().mcpList().catch(() => null)
+    if (r) setMcpStatuses(r.statuses)
+  }
+  useEffect(() => {
+    if (tab === 'mcp') void loadMcp()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab])
+
+  const saveMcp = async (): Promise<void> => {
+    const name = mcpForm.name.trim()
+    const line = mcpForm.command.trim()
+    setMcpHint(null)
+    if (!name) { setMcpHint('名称必填'); return }
+    if (!line) { setMcpHint('启动命令必填'); return }
+    let env: Record<string, string> | undefined
+    if (mcpForm.env.trim()) {
+      try {
+        const v = JSON.parse(mcpForm.env) as unknown
+        if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('环境变量需为 JSON 对象')
+        env = v as Record<string, string>
+      } catch (e) {
+        setMcpHint(`环境变量格式错误：${e instanceof Error ? e.message : String(e)}`)
+        return
+      }
+    }
+    const parts = line.split(/\s+/)
+    const def: McpServerDef = { command: parts[0] ?? line, args: parts.slice(1), env, enabled: true }
+    setMcpBusy(true)
+    const r = await getApi().mcpSave(name, def).catch((e) => ({ ok: false as const, error: String(e) }))
+    setMcpBusy(false)
+    if (!r.ok) {
+      setMcpHint(r.error ?? '保存失败')
+      return
+    }
+    setMcpForm({ name: '', command: '', env: '' })
+    await loadMcp()
+  }
+  const toggleMcp = async (name: string, on: boolean): Promise<void> => {
+    await getApi().mcpSetEnabled(name, on)
+    await loadMcp()
+  }
+  const delMcp = async (name: string): Promise<void> => {
+    if (!window.confirm(`删除 MCP 服务器「${name}」？`)) return
+    await getApi().mcpRemove(name)
+    await loadMcp()
+  }
+
   const toggleTool = (name: string, enabled: boolean) => {
     void getApi().setToolEnabled(name, enabled).then(() =>
       getApi()
@@ -143,7 +200,8 @@ export function SettingsOverlay({ config, onSave, onConfigChange, onClose, onPic
       providerId: providerId || undefined,
       baseUrl,
       model,
-      contextWindow: toNumberOrUndefined(contextWindow)
+      contextWindow: toNumberOrUndefined(contextWindow),
+      webSearch: webSearchKey.trim() ? { provider: 'tavily', apiKey: webSearchKey.trim() } : undefined
     })
   }
 
@@ -650,27 +708,28 @@ export function SettingsOverlay({ config, onSave, onConfigChange, onClose, onPic
               </div>
               {extHint && <div className="catalog-hint" style={{ marginBottom: 12 }}>{extHint}</div>}
 
-              {/* 工具开关 */}
+              {/* 工具开关（扩展自带工具不在此列出，由扩展卡片总开关管理；MCP 工具按前缀单列） */}
               <div className="tools-head" title="只读模式下，可变更类工具强制关闭">
                 <span className="tools-title">
-                  工具 <span className="tools-count mono">{tools.length}</span>
+                  工具 <span className="tools-count mono">{tools.filter((t) => t.source === 'builtin' || t.name.startsWith('mcp_')).length}</span>
                 </span>
               </div>
-              {(['builtin', 'extension'] as const).map((src) => {
-                const list = tools.filter((t) => t.source === src)
+              {(['builtin', 'mcp'] as const).map((src) => {
+                const list = tools.filter((t) => (src === 'builtin' ? t.source === 'builtin' : t.name.startsWith('mcp_')))
                 if (list.length === 0) return null
                 return (
                   <div key={src} className="tools-group">
-                    <div className="tools-group-label">{src === 'builtin' ? '内置' : '扩展'}</div>
+                    <div className="tools-group-label">{src === 'builtin' ? '内置' : 'MCP'}</div>
                     {list.map((t) => (
-                      <div key={t.name} className="tool-card" title={t.mutating ? '可变更工作区的工具' : '只读工具'}>
+                      <div key={t.name} className="tool-card" title={t.hint ?? (t.mutating ? '可变更工作区的工具' : '只读工具')}>
                         <span className="tool-card-name mono">{t.name}</span>
                         {t.mutating && <span className="mut-badge">写</span>}
+                        {t.hint && <span className="tool-hint">{t.hint}</span>}
                         <input
                           type="checkbox"
                           className="switch"
                           checked={t.enabled}
-                          disabled={t.mutating && config.readOnly}
+                          disabled={(t.mutating && config.readOnly) || Boolean(t.hint)}
                           onChange={(e) => toggleTool(t.name, e.target.checked)}
                         />
                       </div>
@@ -679,6 +738,98 @@ export function SettingsOverlay({ config, onSave, onConfigChange, onClose, onPic
                 )
               })}
               {tools.length === 0 && <div className="catalog-hint">（载入中…）</div>}
+            </div>
+          )}
+
+          {tab === 'mcp' && (
+            <div>
+              <div className="ext-head">
+                <span className="tools-title">
+                  MCP 服务 <span className="tools-count mono">{mcpStatuses.length}</span>
+                </span>
+                <span className="meta-spacer" />
+                <button className="btn btn-ghost" title="重连全部启用的服务器" onClick={() => void loadMcp()}>
+                  <IconRefresh size={12} />
+                  刷新
+                </button>
+              </div>
+              <div className="ext-desc" style={{ marginBottom: 10 }}>
+                MCP 服务器经 stdio 提供额外工具（注册为 mcp_名称_工具，默认需审批）。配置存于 userData/mcp.json。
+              </div>
+              <div className="ext-list">
+                {mcpStatuses.map((s) => (
+                  <div key={s.name} className={`ext-card${s.status === 'disabled' ? ' off' : ''}`}>
+                    <span className="ext-avatar">M</span>
+                    <div className="ext-main">
+                      <div className="ext-name-row">
+                        <span className="ext-name mono">{s.name}</span>
+                        <span className={`proto-chip mono ext-src ${s.status === 'ready' ? 'ok' : s.status}`}>
+                          {s.status === 'ready' ? '就绪' : s.status === 'disabled' ? '已停用' : '错误'}
+                        </span>
+                      </div>
+                      <div className="ext-desc mono">{s.command}</div>
+                      {s.error && <div className="ext-error">{s.error}</div>}
+                      <div className="ext-meta mono">工具 {s.tools ?? 0}</div>
+                    </div>
+                    <div className="ext-actions">
+                      <input
+                        type="checkbox"
+                        className="switch"
+                        checked={s.status !== 'disabled'}
+                        onChange={(e) => void toggleMcp(s.name, e.target.checked)}
+                      />
+                      <button className="ext-del" title="删除 MCP 服务器" onClick={() => void delMcp(s.name)}>
+                        <IconTrash size={13} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {mcpStatuses.length === 0 && (
+                  <div className="ext-empty">
+                    尚未添加 MCP 服务器
+                    <span>在下方填写启动命令，如：npx -y @modelcontextprotocol/server-everything</span>
+                  </div>
+                )}
+              </div>
+
+              {/* 添加表单：命令整行粘贴（首 token = 命令，其余 = 参数） */}
+              <div className="tools-head">
+                <span className="tools-title">添加服务器</span>
+              </div>
+              <label className="field">
+                <span>名称</span>
+                <input
+                  className="sunken"
+                  value={mcpForm.name}
+                  placeholder="如 fetch（小写字母/数字/-/_）"
+                  onChange={(e) => setMcpForm({ ...mcpForm, name: e.target.value })}
+                />
+              </label>
+              <label className="field">
+                <span>启动命令（整行粘贴）</span>
+                <input
+                  className="sunken mono"
+                  value={mcpForm.command}
+                  placeholder="npx -y @modelcontextprotocol/server-everything"
+                  onChange={(e) => setMcpForm({ ...mcpForm, command: e.target.value })}
+                />
+              </label>
+              <label className="field" title='JSON 对象，如 {"API_KEY":"xxx"}（可选）'>
+                <span>环境变量（JSON 对象，可选）</span>
+                <input
+                  className="sunken mono"
+                  value={mcpForm.env}
+                  placeholder='{"API_KEY":"sk-..."}'
+                  onChange={(e) => setMcpForm({ ...mcpForm, env: e.target.value })}
+                />
+              </label>
+              {mcpHint && <div className="ext-error">{mcpHint}</div>}
+              <div className="pv-actions">
+                <span className="meta-spacer" />
+                <button className="btn btn-primary" disabled={mcpBusy} onClick={() => void saveMcp()}>
+                  {mcpBusy ? '启动中…' : '添加并启动'}
+                </button>
+              </div>
             </div>
           )}
 
@@ -692,6 +843,16 @@ export function SettingsOverlay({ config, onSave, onConfigChange, onClose, onPic
                     选择文件夹…
                   </button>
                 </div>
+              </label>
+              <label className="field" title="Tavily 联网搜索的 API Key（tavily.com 免费注册，1000 次/月）；留空 = 不注册 web_search/web_fetch 工具">
+                <span>联网搜索 Tavily Key</span>
+                <input
+                  className="sunken mono"
+                  type="password"
+                  value={webSearchKey}
+                  onChange={(e) => setWebSearchKey(e.target.value)}
+                  placeholder="tvly-…（留空禁用联网工具）"
+                />
               </label>
             </>
           )}

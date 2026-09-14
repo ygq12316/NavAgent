@@ -96,6 +96,12 @@ const api: NavAgentApi = {
   setToolEnabled: (name: string, enabled: boolean): Promise<void> => ipcRenderer.invoke('tools:setEnabled', name, enabled),
   reloadExtensions: (): Promise<ReloadResult> => ipcRenderer.invoke('extensions:reload'),
   listExtensions: (): Promise<ExtensionInfo[]> => ipcRenderer.invoke('extensions:list'),
+  mcpList: (): Promise<{ statuses: import('@shared/types').McpServerStatus[]; config: import('@shared/types').McpConfig }> =>
+    ipcRenderer.invoke('mcp:list'),
+  mcpSave: (name: string, def: import('@shared/types').McpServerDef): Promise<{ ok: boolean; error?: string; id?: string }> =>
+    ipcRenderer.invoke('mcp:save', name, def),
+  mcpRemove: (name: string): Promise<'ok'> => ipcRenderer.invoke('mcp:remove', name),
+  mcpSetEnabled: (name: string, enabled: boolean): Promise<'ok'> => ipcRenderer.invoke('mcp:setEnabled', name, enabled),
   installExtension: (): Promise<ExtensionOpResult> => ipcRenderer.invoke('extensions:install'),
   removeExtension: (id: string): Promise<ExtensionOpResult> => ipcRenderer.invoke('extensions:remove', id),
   setExtensionEnabled: (id: string, enabled: boolean): Promise<ExtensionInfo[]> =>
