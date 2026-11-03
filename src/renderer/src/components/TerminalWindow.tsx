@@ -1,8 +1,60 @@
 import { useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
+import type { ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { getApi } from '../api'
 import { IconPlus } from './icons'
+
+/** 终端配色（跟随 app 双主题）：不能用 getPropertyValue('--tx') —— CSS 变量读出来是 "var(--xxx)" 字面量，
+ *  xterm 解析失败后回退到内置默认色，与主题脱节（浅色主题下看不清的根因）。直接给两套解析好的色值。 */
+const TERM_THEMES: Record<'dark' | 'light', ITheme> = {
+  dark: {
+    background: '#00000000',
+    foreground: '#e6e9ef',
+    cursor: '#7f9c8b',
+    selectionBackground: 'rgba(127, 156, 139, 0.32)',
+    black: '#151517',
+    red: '#d87656',
+    green: '#6cab6c',
+    yellow: '#c9a15e',
+    blue: '#6ba6c8',
+    magenta: '#8b84c7',
+    cyan: '#5aa0a0',
+    white: '#e6e9ef',
+    brightBlack: '#626a78',
+    brightRed: '#e88b6d',
+    brightGreen: '#85c285',
+    brightYellow: '#ddb873',
+    brightBlue: '#8fc0dd',
+    brightMagenta: '#a49fe0',
+    brightCyan: '#7cc4c4',
+    brightWhite: '#f5f7fa'
+  },
+  light: {
+    background: '#00000000',
+    foreground: '#1b2230',
+    cursor: '#3f6b52',
+    selectionBackground: 'rgba(63, 107, 82, 0.25)',
+    black: '#1b2230',
+    red: '#c7442c',
+    green: '#2e7d43',
+    yellow: '#8a6a1f',
+    blue: '#3d6e86',
+    magenta: '#55509e',
+    cyan: '#2f7f86',
+    white: '#4a5262',
+    brightBlack: '#6b7688',
+    brightRed: '#d8603f',
+    brightGreen: '#3f9457',
+    brightYellow: '#a9852f',
+    brightBlue: '#508ca8',
+    brightMagenta: '#6f68b8',
+    brightCyan: '#3f96a0',
+    brightWhite: '#1b2230'
+  }
+}
+
+const termTheme = (): ITheme => TERM_THEMES[document.documentElement.dataset.theme === 'light' ? 'light' : 'dark']
 
 interface Props {
   sessionId: string
@@ -73,6 +125,17 @@ export function TerminalWindow({ sessionId, ptys, onCreated, onClosed }: Props) 
     })
   }, [sessionId])
 
+  // 主题切换热更新：已打开的终端跟随 app 双主题（<html data-theme> 是唯一事实源）
+  useEffect(() => {
+    const applyTheme = (): void => {
+      const t = termTheme()
+      for (const { term } of terms.current.values()) term.options.theme = t
+    }
+    const mo = new MutationObserver(applyTheme)
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
+    return () => mo.disconnect()
+  }, [])
+
   // active 标签创建 xterm（每个 id 只建一次；重开回放环形缓冲）
   useEffect(() => {
     if (!active) return
@@ -82,11 +145,7 @@ export function TerminalWindow({ sessionId, ptys, onCreated, onClosed }: Props) 
       fontFamily: "'Cascadia Mono', Consolas, monospace",
       fontSize: 12,
       convertEol: false,
-      theme: {
-        background: '#00000000',
-        foreground: getComputedStyle(document.documentElement).getPropertyValue('--tx').trim() || '#33312c',
-        cursor: '#7f9c8b'
-      }
+      theme: termTheme()
     })
     const fit = new FitAddon()
     term.loadAddon(fit)

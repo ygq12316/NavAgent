@@ -1,6 +1,7 @@
 node_modules/
 dist/
 out/
+release/
 *.local
 
 # 本地工具状态（skills CLI 安装副本、brainstorm 运行数据、个人设置）

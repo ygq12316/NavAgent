@@ -155,6 +155,8 @@ export const initialAppState: AppState = {
 
 export type Action =
   | { kind: 'addressed'; sessionId: string; event: AgentEvent }
+  /** 渲染合帧：一批事件一次 reducer 折叠（流式/工具高频事件逐条 dispatch 会放大成重渲染风暴） */
+  | { kind: 'eventsBatch'; items: { sessionId: string; event: AgentEvent }[] }
   | { kind: 'hydrate'; sessionId: string; result: SessionLoadResult }
   | { kind: 'openSession'; sessionId: string; side?: 'left' | 'right' }
   | { kind: 'closeSessionPane'; side: 'left' | 'right' }
@@ -427,6 +429,10 @@ function applyEvent(state: UIState, e: AgentEvent): UIState {
         ...state,
         working: false,
         retryHint: null,
+        // 回合终态：挂起的审批/扩展弹窗全部作废（主进程 abort 路径已 deny），
+        // 否则模态遮罩滞留会挡住输入框
+        permission: null,
+        uiDialog: null,
         turns: state.turns.map((t) => ({ ...t, done: true, blocks: t.blocks.map((b) => (b.kind === 'assistant' ? { ...b, streaming: false } : b)) }))
       }
 
@@ -551,7 +557,23 @@ export function appReducer(state: AppState, action: Action): AppState {
       const sid = action.sessionId || focusedId(state)
       if (!sid) return state
       const bucket = state.sessions[sid] ?? initialSessionState
-      return { ...state, sessions: { ...state.sessions, [sid]: applyEvent(bucket, action.event) } }
+      const applied = applyEvent(bucket, action.event)
+      // 事件未改变会话桶（未知事件/pty 类）时原样返回：React 据此跳过整树重渲染
+      if (applied === bucket) return state
+      return { ...state, sessions: { ...state.sessions, [sid]: applied } }
+    }
+
+    case 'eventsBatch': {
+      let next = state
+      for (const item of action.items) {
+        const sid = item.sessionId || focusedId(next)
+        if (!sid) continue
+        const bucket = next.sessions[sid] ?? initialSessionState
+        const applied = applyEvent(bucket, item.event)
+        if (applied === bucket) continue
+        next = { ...next, sessions: { ...next.sessions, [sid]: applied } }
+      }
+      return next
     }
 
     case 'hydrate': {

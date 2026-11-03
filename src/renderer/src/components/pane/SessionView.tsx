@@ -1,7 +1,7 @@
 // src/renderer/src/components/pane/SessionView.tsx
 /** 会话 pane：chat 锚点 + 从属 pane（files/file/terminal/preview/diff）。
  *  右侧所有面板从聊天窗口右上角唤出（参考图：chat 头部右半区的小控件群）。 */
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import type { ApiConfig, DiffSummary, ImageContent, PermissionDecision, PermissionMode, SessionMeta, ThinkingLevel } from '@shared/types'
 import type { UIState, ViewMode } from '../../state/reducer'
 import type { PaneKind, PaneNode } from '../../state/pane-layout'
@@ -14,7 +14,7 @@ import { Composer } from '../Composer'
 import { ProjectSelect } from '../ProjectSelect'
 import { DiffPane } from '../DiffPane'
 import { TerminalWindow } from '../TerminalWindow'
-import { IconClose, IconEye, IconFile, IconGitDiff, IconTerminal } from '../icons'
+import { IconClose, IconFile, IconGitDiff, IconTerminal } from '../icons'
 
 export interface SessionViewProps {
   side: 'left' | 'right'
@@ -32,6 +32,8 @@ export interface SessionViewProps {
   config: ApiConfig
   /** Git 面板点击改动文件 → Diff pane 聚焦该文件（跨会话路由，key 触发重新定位） */
   diffFocus?: { sessionId: string; path: string; key: number } | null
+  /** 回到此消息后：输入框聚焦信号（key 触发 Composer useEffect） */
+  draftFocus?: { sessionId: string; key: number } | null
   active: boolean
   onSetDraft: (text: string) => void
   onSend: (text: string, images?: ImageContent[]) => void
@@ -48,7 +50,6 @@ export interface SessionViewProps {
   onPaneAction: (a: { kind: 'paneRatio'; path: number[]; ratio: number } | { kind: 'paneDrop'; win: PaneKind; target: PaneKind; mode: 'left' | 'right' | 'top' | 'bottom' | 'swap' }) => void
   onSetMode: (mode: PermissionMode) => void
   onSetThinking: (level: ThinkingLevel) => void
-  onSetViewMode: (mode: ViewMode) => void
   onSetModel: (id: string) => void
   onPtyCreated: (ptyId: string) => void
   onPtyClosed: (ptyId: string) => void
@@ -64,8 +65,6 @@ export interface SessionViewProps {
   onPickFolder: () => Promise<string | null>
 }
 
-const VIEW_LABEL: Record<ViewMode, string> = { normal: '常规', verbose: '详细', summary: '摘要' }
-
 /** 聊天右上角的面板召唤钮（图标化 + 悬停说明；文件树与编辑器合并为一个「文件」面板） */
 const SUMMONABLE: { kind: 'file' | 'terminal' | 'diff'; label: string; icon: typeof IconFile }[] = [
   { kind: 'file', label: '文件', icon: IconFile },
@@ -73,15 +72,20 @@ const SUMMONABLE: { kind: 'file' | 'terminal' | 'diff'; label: string; icon: typ
   { kind: 'diff', label: 'Diff 审查', icon: IconGitDiff }
 ]
 
-export function SessionView(p: SessionViewProps) {
+/** memo：App 级任意状态变化（其他会话事件、draft、布局）不再让无变化的会话 pane 全量重渲染；
+ *  只比较数据 props——回调 props 语义稳定（按 sid 闭包 dispatch/api），key 含 sid+side 挂载期不变，故意忽略 */
+export const SessionView = memo(function SessionView(p: SessionViewProps) {
   const [fileDirty, setFileDirty] = useState(false)
   const prevWorking = useRef(p.bucket.working)
 
   const working = p.bucket.working
   const mode: PermissionMode = p.meta?.permissionMode ?? p.config.defaultPermissionMode ?? 'manual'
+  // hasPane 读 ref：传给 memo 化 Transcript 的闭包可能跨渲染存活，需取到最新布局
+  const layoutRef = useRef(p.layout)
+  layoutRef.current = p.layout
   const hasPane = (kind: PaneKind): boolean => {
     const walk = (n: PaneNode): boolean => (n.t === 'leaf' ? n.kind === kind : walk(n.a) || walk(n.b))
-    return walk(p.layout)
+    return walk(layoutRef.current)
   }
 
   // turn 结束后刷新 diff 汇总（+N −M 徽标 + 文件树「本次会话改动」置顶列表）
@@ -134,18 +138,7 @@ export function SessionView(p: SessionViewProps) {
 
   const chatHeaderActions = (
     <>
-      {working && (
-        <>
-          <span className="spin-ring" />
-          <button
-            className={`win-btn icon${p.viewMode !== 'normal' ? ' on' : ''}`}
-            onClick={() => p.onSetViewMode(p.viewMode === 'normal' ? 'verbose' : p.viewMode === 'verbose' ? 'summary' : 'normal')}
-            title={`视图：${VIEW_LABEL[p.viewMode]}（Ctrl+O 循环）`}
-          >
-            <IconEye size={14} />
-          </button>
-        </>
-      )}
+      {working && <span className="spin-ring" />}
       {p.diffSummary && (
         <button
           className="diff-chip mono"
@@ -236,6 +229,7 @@ export function SessionView(p: SessionViewProps) {
             onCancel={p.onCancel}
             model={p.meta?.model || p.config.model}
             defaultModel={p.config.model}
+            providerId={p.config.providerId}
             thinking={p.config.modelParams?.thinkingLevel}
             onSetThinking={p.onSetThinking}
             permissionMode={mode}
@@ -243,6 +237,7 @@ export function SessionView(p: SessionViewProps) {
             onSetModel={p.onSetModel}
             contextTokens={p.bucket.usage ? p.bucket.usage.inputTokens + (p.bucket.usage.cacheReadTokens ?? 0) + (p.bucket.usage.cacheWriteTokens ?? 0) : null}
             contextWindow={catalogContextWindowOf(p.meta?.model || p.config.model, p.config.contextWindow)}
+            focusKey={p.draftFocus?.sessionId === p.sessionId ? p.draftFocus.key : 0}
             stats={p.bucket.stats}
             appendWhileRunning={p.config.appendWhileRunning ?? true}
             injectedFiles={injectedFiles}
@@ -293,4 +288,20 @@ export function SessionView(p: SessionViewProps) {
       </div>
     </div>
   )
-}
+}, (a, b) =>
+  a.side === b.side &&
+  a.sessionId === b.sessionId &&
+  a.meta === b.meta &&
+  a.bucket === b.bucket &&
+  a.layout === b.layout &&
+  a.maximized === b.maximized &&
+  a.draft === b.draft &&
+  a.fileTarget === b.fileTarget &&
+  a.ptys === b.ptys &&
+  a.diffSummary === b.diffSummary &&
+  a.viewMode === b.viewMode &&
+  a.config === b.config &&
+  a.diffFocus === b.diffFocus &&
+  a.draftFocus === b.draftFocus &&
+  a.active === b.active
+)

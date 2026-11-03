@@ -7,8 +7,39 @@
     "dev": "electron-vite dev",
     "dev:web": "vite",
     "build": "electron-vite build",
+    "dist": "electron-vite build && electron-builder --win",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
+  },
+  "build": {
+    "appId": "com.navagent.desktop",
+    "productName": "navAgent",
+    "npmRebuild": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "**/node-pty/**",
+      "**/*.node"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "navAgent-Portable-${version}.exe"
+    }
   },
   "dependencies": {
     "@codemirror/lang-css": "^6.3.1",
@@ -41,6 +72,7 @@
     "@types/react-dom": "^19.2.5",
     "@vitejs/plugin-react": "^6.1.1",
     "electron": "^44.0.0",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "highlight.js": "^11.12.0",
     "playwright-core": "^1.63.0",

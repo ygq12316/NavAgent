@@ -6,12 +6,14 @@ interface Props {
   model: string
   /** 全局默认模型（常驻列表，标注「默认」——会话切走后仍可切回，对齐 Claude Code 的 Default 选项） */
   defaultModel?: string
+  /** 选定的供应商 id：有值时只列该供应商的模型（设置里勾选谁就显示谁），未命中则回退全列表 */
+  providerId?: string
   onPick: (id: string) => void
 }
 
 /** 模型切换悬浮窗：紧凑索引列表（行尾序号、当前行打勾、悬停看全名）。
- * 数据源 = 渲染层本地目录快照（models.json 各供应商模型 + 默认模型 + 当前模型），纯本地即时渲染，不依赖网络与主进程探测。 */
-export function ModelPopover({ model, defaultModel, onPick }: Props) {
+ * 数据源 = 渲染层本地目录快照；显示范围跟随选定的供应商，不以模型 id 反查（同 id 可存在于多个供应商）。 */
+export function ModelPopover({ model, defaultModel, providerId, onPick }: Props) {
   const [ids, setIds] = useState<string[] | null>(null)
 
   useEffect(() => {
@@ -22,15 +24,17 @@ export function ModelPopover({ model, defaultModel, onPick }: Props) {
       .listCatalog()
       .then((snap) => {
         if (!alive) return
+        const prov = providerId ? snap.customs?.find((c) => c.id === providerId) : undefined
+        const list = prov ? prov.models.map((m) => m.id) : snap.models.map((m) => m.model)
         setIds(
-          [...new Set([...snap.models.map((m) => m.model), ...(defaultModel ? [defaultModel] : []), ...(model ? [model] : [])])].filter(Boolean)
+          [...new Set([...list, ...(defaultModel ? [defaultModel] : []), ...(model ? [model] : [])])].filter(Boolean)
         )
       })
       .catch(() => undefined)
     return () => {
       alive = false
     }
-  }, [model, defaultModel])
+  }, [model, defaultModel, providerId])
 
   return (
     <div className="model-pop">

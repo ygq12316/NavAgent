@@ -35,8 +35,8 @@ export function createSessionOps(deps: SessionOpsDeps) {
      * summarize=true 且目标不是原叶子的后代时，为被离开路径生成分支摘要并挂到新导航点；
      * 运行实例存在时同步重载其 transcript；renderer 事后自行 loadSession 重新 hydrate。
      */
-    async switchLeaf(id: string, nodeId: string, summarize: boolean): Promise<TreeSummaryResult | 'busy'> {
-      if (typeof id !== 'string' || typeof nodeId !== 'string') return { summaryInjected: false }
+    async switchLeaf(id: string, nodeId: string | null, summarize: boolean): Promise<TreeSummaryResult | 'busy'> {
+      if (typeof id !== 'string' || (nodeId !== null && typeof nodeId !== 'string')) return { summaryInjected: false }
       if (isRunning(id)) {
         notice(id, '运行中无法切换分支，请先停止。')
         return 'busy'
@@ -44,7 +44,7 @@ export function createSessionOps(deps: SessionOpsDeps) {
       try {
         const oldLeaf = store.getLeaf(id)
         const oldChain = oldLeaf ? store.getAncestors(id, oldLeaf) : []
-        const targetChain = store.getAncestors(id, nodeId)
+        const targetChain = nodeId === null ? [] : store.getAncestors(id, nodeId)
         const movingForward = oldLeaf !== null && targetChain.includes(oldLeaf)
 
         const { messages } = store.switchLeaf(id, nodeId)

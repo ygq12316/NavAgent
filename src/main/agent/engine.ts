@@ -26,10 +26,18 @@ function errMsg(err: unknown): string {
  */
 export function agentLoop(opts: RunOptions): AgentEventStream {
   const stream = new AgentEventStream()
-  void runAgentLoop(opts, (event) => stream.push(event)).then((messages) => {
-    stream.end(messages)
-  })
+  void runAgentLoop(opts, (event) => stream.push(event))
+    .then((messages) => stream.end(messages))
+    .catch((err) => finishLoopOnError(stream, err))
   return stream
+}
+
+/** 兜底：loop 自身异常（hook/压缩/溢出恢复等）不允许吞掉 agent_end 终态——
+ *  否则事件流悬挂，consume 永不返回，running/working 双双卡死（renderer 表现为输入框无法继续对话） */
+function finishLoopOnError(stream: AgentEventStream, err: unknown): void {
+  stream.push({ type: 'notice', message: `内部错误：${errMsg(err)}` })
+  stream.push({ type: 'agent_end', messages: [] })
+  stream.end([])
 }
 
 /** 从现有上下文继续（重试/续跑语义）：最后一条消息必须是 user 或 tool_result（对齐 pi 的 agentLoopContinue） */
@@ -38,9 +46,9 @@ export function agentLoopContinue(opts: Omit<RunOptions, 'prompts'>): AgentEvent
   const last = opts.context.messages[opts.context.messages.length - 1]
   if (last.role === 'assistant') throw new Error('Cannot continue from assistant message')
   const stream = new AgentEventStream()
-  void runAgentLoop({ ...opts, prompts: [] }, (event) => stream.push(event)).then((messages) => {
-    stream.end(messages)
-  })
+  void runAgentLoop({ ...opts, prompts: [] }, (event) => stream.push(event))
+    .then((messages) => stream.end(messages))
+    .catch((err) => finishLoopOnError(stream, err))
   return stream
 }
 

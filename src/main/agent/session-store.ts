@@ -206,15 +206,15 @@ export class SessionStore {
     }))
   }
 
-  /** 切换活动叶子：leafId 持久化，返回新活动路径的线性消息 */
-  switchLeaf(id: string, nodeId: string): { messages: AgentMessage[] } {
+  /** 切换活动叶子：leafId 持久化，返回新活动路径的线性消息；nodeId=null 清空活动路径（根消息改写重发语义） */
+  switchLeaf(id: string, nodeId: string | null): { messages: AgentMessage[] } {
     const meta = this.metas.get(id)
     if (!meta) throw new Error(`会话不存在：${id}`)
     const nodes = this.readNodes(id)
-    if (!nodes.some((n) => n.id === nodeId)) throw new Error(`树节点不存在：${nodeId}`)
-    meta.leafId = nodeId
+    if (nodeId !== null && !nodes.some((n) => n.id === nodeId)) throw new Error(`树节点不存在：${nodeId}`)
+    meta.leafId = nodeId ?? undefined
     this.db.setSessionLeaf(id, nodeId)
-    return { messages: activePathMessages(nodes, nodeId) }
+    return { messages: nodeId === null ? [] : activePathMessages(nodes, nodeId) }
   }
 
   /** (fromExclusive, toInclusive] 区间的消息（被离开分支摘要的输入） */

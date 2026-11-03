@@ -985,14 +985,23 @@ pnpm test         # vitest run
     return this.nodesOf(id)
   }
 
-  async switchLeaf(id: string, nodeId: string, _summarize: boolean): Promise<TreeSummaryResult | 'busy'> {
+  async switchLeaf(id: string, nodeId: string | null, _summarize: boolean): Promise<TreeSummaryResult | 'busy'> {
     if (this.running.has(id)) return 'busy'
+    const s = this.sessions.get(id)
     const nodes = this.nodesOf(id)
-    if (!nodes.some((n) => n.id === nodeId)) return { summaryInjected: false }
-    if (nodes.at(-1)?.id !== nodeId) {
-      this.emit(id, { type: 'notice', message: '（演示模式：仅支持从最新节点续跑）' })
-      return { summaryInjected: false }
+    const idx = nodes.findIndex((n) => n.id === nodeId)
+    if (!s || idx === -1) return { summaryInjected: false }
+    // 回到此消息 = 事件流截断到第 idx+1 个 message_end（含自身，此后内容丢弃），App 事后 hydrate 重放
+    let seen = 0
+    let cut = s.events.length
+    for (let i = 0; i < s.events.length; i++) {
+      if (s.events[i].type === 'message_end' && ++seen > idx) {
+        cut = i + 1
+        break
+      }
     }
+    s.events = s.events.slice(0, cut)
+    s.meta.leafId = nodeId ?? undefined
     return { summaryInjected: false }
   }
 

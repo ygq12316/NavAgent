@@ -283,7 +283,11 @@ export class Agent {
           args,
           {
             workspacePath: this.deps.getWorkspacePath(),
-            ...(this.deps.terminal ? { terminal: this.deps.terminal } : {})
+            ...(this.deps.terminal ? { terminal: this.deps.terminal } : {}),
+            // 观察窗转后台的命令结束时自动上报结果（进 followUp 队列，下一轮注入模型上下文）
+            notifyBackground: (text) => {
+              this.followUp(text)
+            }
           },
           signal
         )

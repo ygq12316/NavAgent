@@ -52,7 +52,7 @@ export interface SessionsCapability {
   /** 从指定节点派生新会话（祖先链复制）；源会话运行中返回 null */
   fork(sessionId: string, nodeId: string): Promise<string | null>
   /** 切换活动叶子（summarize=为被离开路径生成分支摘要）；运行中返回 'busy' */
-  switchLeaf(sessionId: string, nodeId: string, summarize: boolean): Promise<import('@shared/types').TreeSummaryResult | 'busy'>
+  switchLeaf(sessionId: string, nodeId: string | null, summarize: boolean): Promise<import('@shared/types').TreeSummaryResult | 'busy'>
   /** 项目下全部会话元数据（含 forkSourceId，会话地图的数据源） */
   listSessions(projectPath: string): Promise<import('@shared/types').SessionMeta[]>
   /** 删除会话：派生子会话断线提升为新的根（不级联删除） */

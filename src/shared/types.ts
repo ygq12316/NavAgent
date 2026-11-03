@@ -502,8 +502,8 @@ export interface NavAgentApi {
   revealPath(sessionId: string, rel: string): Promise<void>
   /** 当前会话的树节点列表 */
   listTree(id: string): Promise<SessionTreeNode[]>
-  /** 切换活动叶子（跳转续跑/改写重发的基础）；summarize=为被离开路径生成分支摘要。该会话运行中返回 busy */
-  switchLeaf(id: string, nodeId: string, summarize: boolean): Promise<TreeSummaryResult | 'busy'>
+  /** 切换活动叶子（跳转续跑/改写重发的基础）；nodeId=null 清空活动路径（根消息改写重发）。summarize=为被离开路径生成分支摘要。该会话运行中返回 busy */
+  switchLeaf(id: string, nodeId: string | null, summarize: boolean): Promise<TreeSummaryResult | 'busy'>
   /** 从指定节点派生新会话文件（祖先链复制，保留节点 id）；源会话运行中返回 null 并发 notice */
   forkSession(id: string, nodeId: string): Promise<string | null>
   /** 复制指定会话的活动分支为新会话；运行中返回 null */

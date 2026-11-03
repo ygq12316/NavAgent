@@ -1,26 +1,34 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useDeferredValue, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
-import type { PermissionVM, UiDialogVM, UIState, ViewMode } from '../state/reducer'
+import type { PermissionVM, TurnVM, UiDialogVM, UIState, ViewMode } from '../state/reducer'
 import type { PermissionDecision, ThinkingContent } from '@shared/types'
 import { ToolBlock } from './ToolBlock'
 import { CodeBlock } from './CodeBlock'
 import { IconAlert, IconArrowCounterClockwise, IconChevronDown, IconCopy, IconFile, IconGitFork, IconLightbulb } from './icons'
 
-/** 历史/流式文本块的 markdown 渲染 memo 化：text 不变即跳过重解析——
- *  流式期间只有尾块变化重跑 ReactMarkdown，历史块（占绝大多数）零成本（渲染风暴的 CPU 大头） */
-const AssistantMarkdown = memo(function AssistantMarkdown({ text }: { text: string }) {
+/** 流式尾块渲染策略：≤6KB 每批实时 markdown（短回答全程格式化且平滑）；更长切纯文本流——
+ *  react-markdown 全量 parse 随文本线性变贵（几十 KB 单次上百 ms × 每秒十次 = 卡顿主热点），
+ *  纯文本追加近零成本；两者都每批更新（无定时器、无跳变节奏），块完成时一次性 markdown+高亮 */
+const MARKDOWN_STREAM_MAX = 6000
+
+const MarkdownRender = memo(function MarkdownRender({ text, streaming, plain }: { text: string; streaming: boolean; plain: boolean }) {
+  if (plain) return <div className="md-plain">{text}</div>
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={{ pre: CodeBlock }}>
+    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={streaming ? [] : [rehypeHighlight]} components={{ pre: CodeBlock }}>
       {text}
     </ReactMarkdown>
   )
+}, (a, b) => a.text === b.text && a.streaming === b.streaming && a.plain === b.plain)
+
+const AssistantMarkdown = memo(function AssistantMarkdown({ text, streaming }: { text: string; streaming: boolean }) {
+  return <MarkdownRender text={text} streaming={streaming} plain={streaming && text.length > MARKDOWN_STREAM_MAX} />
 })
 
 const ThinkingPanelMemo = memo(ThinkingPanel)
 
-/** 思考过程：与工具块同族的左规线行；流式期间自动展开显示「思考中」，结束后自动收起 */
+/** 思考过程：默认收起（不自动展开，即使流式中）——点箭头手动展开；展开后随流式实时增长 */
 function ThinkingPanel({ block, streaming }: { block: ThinkingContent; streaming: boolean }) {
   if (block.redacted) {
     return (
@@ -33,15 +41,12 @@ function ThinkingPanel({ block, streaming }: { block: ThinkingContent; streaming
     )
   }
   return (
-    <details className="thinking-panel" open={streaming ? true : undefined}>
+    <details className="thinking-panel">
       <summary className="thinking-toggle" title="模型的内部思考">
         <IconLightbulb size={12} className="thinking-mark" />
         <span className="thinking-label">{streaming ? '思考中…' : `思考 · ${block.thinking.length} 字`}</span>
-        {streaming ? (
-          <span className="spin-ring" />
-        ) : (
-          <IconChevronDown size={11} className="thinking-caret" />
-        )}
+        {streaming && <span className="spin-ring" />}
+        <IconChevronDown size={11} className="thinking-caret" />
       </summary>
       <div className="thinking-body mono">{block.thinking}</div>
     </details>
@@ -49,6 +54,107 @@ function ThinkingPanel({ block, streaming }: { block: ThinkingContent; streaming
 }
 
 const CHIPS = ['总结这份调研报告', '运行 dir 看看目录结构', '这个项目用的什么架构？']
+
+interface TurnRowProps {
+  turn: TurnVM
+  sessionId: string
+  viewMode: ViewMode
+  onRewind?: (sessionId: string, nodeId: string, text?: string) => void
+  onFork?: (sessionId: string, nodeId: string) => void
+  onOpenPath?: (p: string) => void
+  onOpenTerminal?: () => void
+  onRunCommand?: (command: string) => void
+}
+
+/** 单回合渲染 memo 化：reducer 的结构共享保证历史 turn 引用永不变——流式/工具事件期间只有
+ *  最后一个 turn 重渲染，全列表 reconcile 从 O(全部回合) 降为 O(1)（长会话打字被饿死的主修复）。
+ *  回调 props 语义稳定（按 sid 闭包 + App 侧 ref 化），key 含 turn.key，故意不参与比较 */
+const TurnRow = memo(function TurnRow({ turn, sessionId, viewMode, onRewind, onFork, onOpenPath, onOpenTerminal, onRunCommand }: TurnRowProps) {
+  return (
+    <div className="turn">
+      {turn.blocks.map((b, i) =>
+        b.kind === 'injected' ? (
+          <div
+            key={i}
+            className="injected-row"
+            title="文件内容已作为独立消息注入上下文；取消注入只影响之后的请求，已注入内容保留至下次压缩"
+          >
+            <IconFile size={12} />
+            <span>已注入上下文</span>
+            <span className="injected-path mono">{b.rel}</span>
+          </div>
+        ) : b.kind === 'user' ? (
+          <div key={i} className="user-row">
+            <div className="user-bubble">
+              <span className="user-text">{b.text}</span>
+              {b.images && b.images.length > 0 && (
+                <span className="user-images">
+                  {b.images.map((im, k) => (
+                    <img key={k} className="user-image" src={`data:${im.mimeType};base64,${im.data}`} alt="附件图片" />
+                  ))}
+                </span>
+              )}
+            </div>
+            {/* 动作行：copy / rewind / fork（每个用户气泡下方右侧，图标） */}
+            <div className="msg-actions">
+              <button
+                title="复制消息"
+                onClick={() => void navigator.clipboard.writeText(b.text)}
+              >
+                <IconCopy size={12} />
+              </button>
+              {b.nodeId && onRewind && (
+                <button
+                  title="回到此处重新开始（丢弃此后内容）"
+                  onClick={() => onRewind(sessionId, b.nodeId!, b.text)}
+                >
+                  <IconArrowCounterClockwise size={12} />
+                </button>
+              )}
+              {b.nodeId && onFork && (
+                <button
+                  title="从此处派生新会话"
+                  onClick={() => onFork(sessionId, b.nodeId!)}
+                >
+                  <IconGitFork size={12} />
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div key={i} className="assistant-wrap">
+            {b.blocks.map((blk, j) =>
+              blk.type === 'text' ? (
+                blk.text ? (
+                  <div key={j} className={`assistant-text md${b.streaming && j === b.blocks.length - 1 ? ' streaming' : ''}`}>
+                    <AssistantMarkdown text={blk.text} streaming={b.streaming && j === b.blocks.length - 1} />
+                    {b.streaming && j === b.blocks.length - 1 && <span className="caret-blink" />}
+                  </div>
+                ) : null
+              ) : viewMode === 'summary' ? null : (
+                <ThinkingPanelMemo key={j} block={blk} streaming={b.streaming && j === b.blocks.length - 1} />
+              )
+            )}
+            {b.toolCalls.map((tool) => (
+              <ToolBlock
+                key={tool.callId}
+                tool={tool}
+                sessionId={sessionId}
+                defaultOpen={viewMode === 'verbose'}
+                hidden={viewMode === 'summary'}
+                onOpenPath={onOpenPath}
+                onOpenTerminal={onOpenTerminal}
+                onRunCommand={onRunCommand}
+              />
+            ))}
+            {b.stopReason === 'error' && b.errorMessage && <div className="error-row">✗ {b.errorMessage}</div>}
+            {b.stopReason === 'aborted' && <div className="aborted-row">已中断</div>}
+          </div>
+        )
+      )}
+    </div>
+  )
+}, (a, b) => a.turn === b.turn && a.viewMode === b.viewMode)
 
 interface Props {
   state: UIState
@@ -63,7 +169,7 @@ interface Props {
   /** 工具块内文件路径点击 → 打开到 File pane */
   onOpenPath?: (p: string) => void
   /** 回到此消息（丢弃后续，切换树叶子） */
-  onRewind?: (sessionId: string, nodeId: string) => void
+  onRewind?: (sessionId: string, nodeId: string, text?: string) => void
   /** 从此消息分叉出新会话 */
   onFork?: (sessionId: string, nodeId: string) => void
   /** 打开终端面板（bash 命令条按钮） */
@@ -72,7 +178,9 @@ interface Props {
   onRunCommand?: (command: string) => void
 }
 
-export function Transcript({ state, sessionId, viewMode = 'normal', onChip, permission, onRespond, onRespondUi, onOpenPath, onRewind, onFork, onOpenTerminal, onRunCommand }: Props) {
+/** memo：draft 输入等无关更新触发 SessionView 重渲染时，bucket 不变即整段 transcript 跳过 reconcile；
+ *  回调 props 语义稳定（按 sid 闭包）故意忽略 */
+export const Transcript = memo(function Transcript({ state, sessionId, viewMode = 'normal', onChip, permission, onRespond, onRespondUi, onOpenPath, onRewind, onFork, onOpenTerminal, onRunCommand }: Props) {
   const ref = useRef<HTMLDivElement>(null)
   const [pinned, setPinned] = useState(true)
 
@@ -93,6 +201,8 @@ export function Transcript({ state, sessionId, viewMode = 'normal', onChip, perm
   }
 
   const empty = state.turns.length === 0 && !state.errorMessage && !state.aborted
+  // 回合列表走低优先级渲染：流式高频更新不打断打字/点击（useDeferredValue 让输入随时抢占）
+  const deferredTurns = useDeferredValue(state.turns)
 
   return (
     <div className="transcript-wrap">
@@ -111,94 +221,22 @@ export function Transcript({ state, sessionId, viewMode = 'normal', onChip, perm
             </div>
           </div>
         ) : (
-          state.turns.map((turn) => (
-            <div key={turn.key} className="turn">
-              {turn.blocks.map((b, i) =>
-                b.kind === 'injected' ? (
-                  <div
-                    key={i}
-                    className="injected-row"
-                    title="文件内容已作为独立消息注入上下文；取消注入只影响之后的请求，已注入内容保留至下次压缩"
-                  >
-                    <IconFile size={12} />
-                    <span>已注入上下文</span>
-                    <span className="injected-path mono">{b.rel}</span>
-                  </div>
-                ) : b.kind === 'user' ? (
-                  <div key={i} className="user-row">
-                    <div className="user-bubble">
-                      <span className="user-text">{b.text}</span>
-                      {b.images && b.images.length > 0 && (
-                        <span className="user-images">
-                          {b.images.map((im, k) => (
-                            <img key={k} className="user-image" src={`data:${im.mimeType};base64,${im.data}`} alt="附件图片" />
-                          ))}
-                        </span>
-                      )}
-                    </div>
-                    {/* 动作行：copy / rewind / fork（每个用户气泡下方右侧，图标） */}
-                    <div className="msg-actions">
-                      <button
-                        title="复制消息"
-                        onClick={() => void navigator.clipboard.writeText(b.text)}
-                      >
-                        <IconCopy size={12} />
-                      </button>
-                      {b.nodeId && onRewind && (
-                        <button
-                          title="回到此处重新开始（丢弃此后内容）"
-                          onClick={() => onRewind(sessionId, b.nodeId!)}
-                        >
-                          <IconArrowCounterClockwise size={12} />
-                        </button>
-                      )}
-                      {b.nodeId && onFork && (
-                        <button
-                          title="从此处派生新会话"
-                          onClick={() => onFork(sessionId, b.nodeId!)}
-                        >
-                          <IconGitFork size={12} />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  <div key={i} className="assistant-wrap">
-                    {b.blocks.map((blk, j) =>
-                      blk.type === 'text' ? (
-                        blk.text ? (
-                          <div key={j} className={`assistant-text md${b.streaming && j === b.blocks.length - 1 ? ' streaming' : ''}`}>
-                            <AssistantMarkdown text={blk.text} />
-                            {b.streaming && j === b.blocks.length - 1 && <span className="caret-blink" />}
-                          </div>
-                        ) : null
-                      ) : viewMode === 'summary' ? null : (
-                        <ThinkingPanelMemo key={j} block={blk} streaming={b.streaming && j === b.blocks.length - 1} />
-                      )
-                    )}
-                    {b.toolCalls.map((tool) => (
-                      <ToolBlock
-                        key={tool.callId}
-                        tool={tool}
-                        sessionId={sessionId}
-                        defaultOpen={viewMode === 'verbose'}
-                        hidden={viewMode === 'summary'}
-                        onOpenPath={onOpenPath}
-                        onOpenTerminal={onOpenTerminal}
-                        onRunCommand={onRunCommand}
-                      />
-                    ))}
-                    {b.stopReason === 'error' && b.errorMessage && <div className="error-row">✗ {b.errorMessage}</div>}
-                    {b.stopReason === 'aborted' && <div className="aborted-row">已中断</div>}
-                  </div>
-                )
-              )}
-            </div>
+          deferredTurns.map((turn) => (
+            <TurnRow
+              key={turn.key}
+              turn={turn}
+              sessionId={sessionId}
+              viewMode={viewMode}
+              onRewind={onRewind}
+              onFork={onFork}
+              onOpenPath={onOpenPath}
+              onOpenTerminal={onOpenTerminal}
+              onRunCommand={onRunCommand}
+            />
           ))
         )}
         {state.retryHint && <div className="retry-row mono">{state.retryHint}</div>}
         {state.notice && <div className="notice-row mono">{state.notice}</div>}
-        {permission && <PermissionPrompt permission={permission} onRespond={onRespond} />}
         {state.uiDialog && onRespondUi && <ExtDialogPrompt dialog={state.uiDialog} onRespond={onRespondUi} />}
       </div>
       {!pinned && (
@@ -215,9 +253,15 @@ export function Transcript({ state, sessionId, viewMode = 'normal', onChip, perm
           ↓ 回到底部
         </button>
       )}
+      {/* 审批弹窗：模态居中（Esc 拒绝由 App 全局处理） */}
+      {permission && (
+        <div className="overlay permission-overlay">
+          <PermissionPrompt permission={permission} onRespond={onRespond} />
+        </div>
+      )}
     </div>
   )
-}
+}, (a, b) => a.state === b.state && a.sessionId === b.sessionId && a.viewMode === b.viewMode && a.permission === b.permission)
 
 function PermissionPrompt({ permission, onRespond }: { permission: PermissionVM; onRespond: (d: PermissionDecision) => void }) {
   useEffect(() => {
@@ -234,7 +278,7 @@ function PermissionPrompt({ permission, onRespond }: { permission: PermissionVM;
   }, [onRespond])
 
   return (
-    <div className="permission">
+    <div className="permission permission-modal">
       <div className="permission-head">
         <IconAlert size={13} />
         <span className="permission-title">需要授权</span>
@@ -243,7 +287,7 @@ function PermissionPrompt({ permission, onRespond }: { permission: PermissionVM;
       </div>
       <pre className="permission-detail mono">{permission.detail}</pre>
       <div className="permission-actions">
-        <button className="btn btn-primary" onClick={() => onRespond('approve')} title="批准本次执行">
+        <button className="btn btn-primary" autoFocus onClick={() => onRespond('approve')} title="批准本次执行（Enter）">
           <span className="kbd">1</span>
           批准
         </button>

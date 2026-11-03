@@ -21,7 +21,7 @@ const TABS: { id: TabId; label: string; icon: typeof IconPlug }[] = [
   { id: 'providers', label: '模型供应商', icon: IconPlug },
   { id: 'tools', label: '工具与扩展', icon: IconWrench },
   { id: 'mcp', label: 'MCP 服务', icon: IconPlug },
-  { id: 'general', label: '通用', icon: IconHouse }
+  { id: 'general', label: '通用设置', icon: IconHouse }
 ]
 
 function toNumberOrUndefined(s: string): number | undefined {
@@ -78,6 +78,8 @@ export function SettingsOverlay({ config, onSave, onConfigChange, onClose, onPic
   /** 探测结果选择面板：null=关闭；数组=端点返回的模型 id（勾选后批量加入） */
   const [probePanel, setProbePanel] = useState<string[] | null>(null)
   const [probeSel, setProbeSel] = useState<Set<string>>(new Set())
+  /** 探测结果搜索过滤（大目录端点如 OpenRouter 返回数百条） */
+  const [probeQuery, setProbeQuery] = useState('')
   const probePopRef = useOutsideClose(() => setProbePanel(null))
   const [renaming, setRenaming] = useState(false)
   const [fName, setFName] = useState('')
@@ -213,6 +215,12 @@ export function SettingsOverlay({ config, onSave, onConfigChange, onClose, onPic
     setFProtocol('openai-compat')
     setFModels([])
     setPvError(null)
+    // 探测/测试残留一并清空，避免串到下一个供应商
+    setProbePanel(null)
+    setProbeSel(new Set())
+    setProbeQuery('')
+    setTestResult({})
+    setTestingId(null)
   }
 
   const openAdd = (): void => {
@@ -220,9 +228,11 @@ export function SettingsOverlay({ config, onSave, onConfigChange, onClose, onPic
     resetForm()
   }
 
-  /** 打开自定义供应商编辑：表单回填 + 同步「当前使用」端点（底部保存生效） */
-  const openCustom = (id: string, list: CustomProviderFull[]): void => {
-    const c = list.find((x) => x.id === id)
+  /** 打开自定义供应商编辑：重拉 main 目录快照（持久化文件为唯一源，外部修改即时可见）+ 表单回填 + 同步「当前使用」端点（底部保存生效） */
+  const openCustom = async (id: string): Promise<void> => {
+    const snap = await getApi().listCatalog()
+    applySnapshot(snap)
+    const c = (snap.customs ?? []).find((x) => x.id === id)
     setSelected(id)
     setEditIdx(null)
     setPvError(null)
@@ -270,7 +280,7 @@ export function SettingsOverlay({ config, onSave, onConfigChange, onClose, onPic
       return null
     }
     applySnapshot(r.snapshot)
-    if (r.id) openCustom(r.id, r.snapshot.customs ?? [])
+    if (r.id) void openCustom(r.id)
     return r
   }
 
@@ -282,7 +292,7 @@ export function SettingsOverlay({ config, onSave, onConfigChange, onClose, onPic
     onConfigChange(c)
   }
 
-  /** 勾选面板：批量加入探测到的模型（跳过已在列表的） */
+  /** 勾选面板确认：批量加入探测到的模型（跳过已在列表的）；已保存的供应商即时落盘 */
   const toggleProbeSel = (id: string): void =>
     setProbeSel((t) => {
       const next = new Set(t)
@@ -291,13 +301,12 @@ export function SettingsOverlay({ config, onSave, onConfigChange, onClose, onPic
       return next
     })
   const addProbedModels = (): void => {
-    setFModels((arr) => {
-      const have = new Set(arr.map((mm) => mm.id.trim()))
-      const add = [...probeSel].filter((id) => !have.has(id)).map((id) => ({ id }))
-      return [...arr, ...add]
-    })
+    const have = new Set(fModels.map((mm) => mm.id.trim()))
+    const merged = [...fModels, ...[...probeSel].filter((id) => !have.has(id)).map((id) => ({ id }))]
+    setFModels(merged)
     setProbePanel(null)
     setProbeSel(new Set())
+    if (selectedCustom) void saveCustomForm(merged)
   }
 
   /** 重命名供应商（连同当前表单一并保存） */
@@ -354,19 +363,13 @@ export function SettingsOverlay({ config, onSave, onConfigChange, onClose, onPic
       setPvError(r.error ?? '探测失败：端点未返回可用模型')
       return
     }
-    // 回退命中：实际成功的协议与表单不同 → 纠正表单并按纠正值落盘
-    const finalProtocol = r.protocolUsed ?? fProtocol
+    // 回退命中：实际成功的协议与表单不同 → 纠正表单（下次保存时一并落盘）
     if (r.protocolUsed && r.protocolUsed !== fProtocol) setFProtocol(r.protocolUsed)
-    // 合并进列表（保留已有条目的上下文窗口），并连同表单里的 Key 一起持久化
-    const merged = (() => {
-      const prev = new Map(fModels.map((m) => [m.id.trim(), m]))
-      return r.models.map((id) => ({ id, contextWindow: prev.get(id)?.contextWindow }))
-    })()
-    setFModels(merged)
-    await saveCustomForm(merged, finalProtocol)
-    // 打开勾选面板（默认全选未添加的），由用户确认后批量加入
+    // 探测只增不删：不覆盖现有列表（llama-server 等单实例服务只报当前加载的模型），
+    // 勾选面板默认全不选，由用户显式挑选后经 addProbedModels 增量加入
     setProbePanel(r.models)
-    setProbeSel(new Set(r.models.filter((id) => !merged.some((m) => m.id.trim() === id))))
+    setProbeSel(new Set())
+    setProbeQuery('')
   }
 
   /** 行内测试：该模型 id 是否在端点 /models 列表中（结果按模型 id 记录，增删行不错位） */
@@ -391,6 +394,10 @@ export function SettingsOverlay({ config, onSave, onConfigChange, onClose, onPic
     setFModels((arr) => arr.filter((_, j) => j !== i))
     setEditIdx(null)
   }
+
+  /** 探测结果按搜索过滤（大小写不敏感子串匹配；回车 = 全选筛选结果中未收录的模型） */
+  const probeQueryLc = probeQuery.trim().toLowerCase()
+  const probeFiltered = (probePanel ?? []).filter((id) => !probeQueryLc || id.toLowerCase().includes(probeQueryLc))
 
   const dotOkCustom = (p: CustomProviderFull): boolean => Boolean(creds.find((c) => c.id === p.id)?.stored) || p.hasInlineKey
   return (
@@ -418,7 +425,7 @@ export function SettingsOverlay({ config, onSave, onConfigChange, onClose, onPic
               <div className="provider-list">
                 <div className="pv-group-label">自定义供应商</div>
                 {customs.map((p) => (
-                  <button key={p.id} className={`pv-item${selected === p.id ? ' on' : ''}`} onClick={() => openCustom(p.id, customs)} title={p.baseUrl}>
+                  <button key={p.id} className={`pv-item${selected === p.id ? ' on' : ''}`} onClick={() => void openCustom(p.id)} title={p.baseUrl}>
                     <span className="pv-avatar">{p.name.slice(0, 1).toUpperCase()}</span>
                     <span className="pv-item-name">{p.name}</span>
                     <span className={`pv-dot${dotOkCustom(p) ? ' ok' : ''}`} title={dotOkCustom(p) ? '凭据已配置' : '未配置凭据'} />
@@ -527,13 +534,31 @@ export function SettingsOverlay({ config, onSave, onConfigChange, onClose, onPic
                         <div className="pv-probe-pop">
                           <div className="pv-probe-head">
                             <span className="pv-probe-title">探测结果</span>
-                            <span className="pv-probe-count mono">{probePanel.length} 个模型</span>
+                            <span className="pv-probe-count mono">
+                              {probeQuery.trim() ? `${probeFiltered.length} / ${probePanel.length}` : `${probePanel.length}`} 个模型
+                            </span>
                             <button className="pv-probe-close" title="关闭" onClick={() => setProbePanel(null)}>
                               <IconClose size={11} />
                             </button>
                           </div>
+                          <input
+                            className="sunken pv-probe-search"
+                            autoFocus
+                            placeholder="搜索模型 id…（回车全选筛选结果）"
+                            value={probeQuery}
+                            onChange={(e) => setProbeQuery(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && probeFiltered.length > 0) {
+                                setProbeSel((t) => {
+                                  const next = new Set(t)
+                                  for (const id of probeFiltered) if (!fModels.some((mm) => mm.id.trim() === id)) next.add(id)
+                                  return next
+                                })
+                              }
+                            }}
+                          />
                           <div className="pv-probe-list">
-                            {probePanel.map((id) => {
+                            {probeFiltered.map((id) => {
                               const already = fModels.some((mm) => mm.id.trim() === id)
                               return (
                                 <label key={id} className={`pv-probe-row${already ? ' dup' : ''}`}>
@@ -549,6 +574,9 @@ export function SettingsOverlay({ config, onSave, onConfigChange, onClose, onPic
                               )
                             })}
                             {probePanel.length === 0 && <div className="pv-probe-empty">端点未返回模型</div>}
+                            {probePanel.length > 0 && probeFiltered.length === 0 && (
+                              <div className="pv-probe-empty">无匹配「{probeQuery.trim()}」的模型</div>
+                            )}
                           </div>
                           <div className="pv-probe-foot">
                             <button className="btn" onClick={() => setProbePanel(null)}>

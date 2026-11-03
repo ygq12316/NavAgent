@@ -119,6 +119,13 @@ function registerExtensionProtocol(): void {
   })
 }
 
+/** 启动期窗口未就绪时 emitAgentEvent 是 no-op——暂存这些 notice，createWindow 完成加载后统一补发 */
+const pendingStartupNotices: string[] = []
+const emitStartupNotice = (message: string): void => {
+  if (BrowserWindow.getAllWindows().length > 0) emitAgentEvent('', { type: 'notice', message })
+  else pendingStartupNotices.push(message)
+}
+
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1280,
@@ -168,6 +175,10 @@ function createWindow(): BrowserWindow {
   } else {
     void win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+  // 窗口就绪后补发启动期暂存的 notice（供应商配置错误等——否则用户永远看不到）
+  win.webContents.on('did-finish-load', () => {
+    for (const m of pendingStartupNotices.splice(0)) emitAgentEvent('', { type: 'notice', message: m })
+  })
   return win
 }
 
@@ -310,7 +321,7 @@ app.whenReady().then(() => {
     // MCP 工具（mcp_<server>_<tool>；mutating 走审批门）——必须在 assembleTools 之前刷新
     const mcpRes = await mcp.refresh()
     for (const st of mcpRes.statuses) {
-      if (st.status === 'error') emitAgentEvent('', { type: 'notice', message: `MCP 服务器 ${st.name} 启动失败：${st.error ?? '?'}` })
+      if (st.status === 'error') emitStartupNotice(`MCP 服务器 ${st.name} 启动失败：${st.error ?? '?'}`)
     }
     lastMcpTools = mcpRes.tools.map((t) => mcp.toRegistryTool(t.server, t))
     const next = assembleTools([...BUILTIN_TOOLS, ...skillTool, ...webToolsOf(c)], [...result.tools, ...lastMcpTools], c)
@@ -319,8 +330,8 @@ app.whenReady().then(() => {
     // models.json 用户级供应商（凭据值语法在 pickProvider 请求时解析）
     const mp = loadModelsJson(app.getPath('userData'))
     customProviders = mp.providers
-    for (const e of mp.errors) emitAgentEvent('', { type: 'notice', message: `供应商配置：${e}` })
-    for (const e of result.errors) emitAgentEvent('', { type: 'notice', message: `扩展加载失败：${e}` })
+    for (const e of mp.errors) emitStartupNotice(`供应商配置：${e}`)
+    for (const e of result.errors) emitStartupNotice(`扩展加载失败：${e}`)
   }
   let lastMcpTools: Tool<any>[] = []
   let lastExtensionTools: Tool<any>[] = []
@@ -333,7 +344,7 @@ app.whenReady().then(() => {
     const web = webToolsOf(cfg)
     const infos = toolInfos([...BUILTIN_TOOLS, ...web], [...lastExtensionTools, ...lastMcpTools], cfg)
     // 条件注册的工具在未配置时也要可见（否则设置里找不到、不知道要去配 key）
-    if (web.length === 0) infos.push(...webToolPlaceholders('需要在「通用」设置 Tavily Key 后启用（tavily.com 免费注册）'))
+    if (web.length === 0) infos.push(...webToolPlaceholders('需要在「通用设置」配置 Tavily Key 后启用（tavily.com 免费注册）'))
     return infos
   }
 
@@ -407,6 +418,12 @@ app.whenReady().then(() => {
       if (nodeId) (event.message as AgentMessage & { nodeId?: string }).nodeId = nodeId
     }
     emitAgentEvent(sessionId, event)
+    // 审批模态可能弹在用户没看屏幕的时刻：任务栏标题提示，回来不再面对"冻结"的窗口
+    if (event.type === 'permission_request') {
+      for (const w of BrowserWindow.getAllWindows()) w.setTitle('【待审批】navAgent')
+    } else if (event.type === 'agent_end') {
+      for (const w of BrowserWindow.getAllWindows()) w.setTitle('navAgent')
+    }
     if (jsonModeEnabled) process.stdout.write(JSON.stringify(event) + '\n')
     store.appendEvent(sessionId, event)
   }

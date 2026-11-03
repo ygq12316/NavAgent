@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { getApi } from './api'
-import type { ApiConfig, ImageContent, PermissionDecision, SessionMeta, ThinkingLevel } from '@shared/types'
+import type { AgentEvent, ApiConfig, ImageContent, PermissionDecision, SessionMeta, ThinkingLevel } from '@shared/types'
 import { parseCommand } from '@shared/types'
 import { appReducer, initialAppState, initialSessionState } from './state/reducer'
 import { defaultPaneLayout, loadPrefs, loadSessionLayouts, savePrefs, saveSessionLayouts, type PaneNode, type UiPrefs } from './state/pane-layout'
@@ -15,6 +15,10 @@ import { ExtensionPanelHost } from './components/ExtensionPanelHost'
 import { IconGear, IconMoon, IconPanelLeft, IconSun } from './components/icons'
 import { registerExtraCatalog } from '@shared/model-catalog'
 
+/** 稳定默认值：renderSession 的 `?? 默认` 若每次渲染新建对象，SessionView 的 memo 比较恒不等（白做） */
+const DEFAULT_LAYOUT = defaultPaneLayout()
+const EMPTY_PTYS: string[] = []
+
 export default function App() {
   const api = getApi()
   const [state, dispatch] = useReducer(appReducer, initialAppState)
@@ -25,6 +29,8 @@ export default function App() {
   const [gitOpen, setGitOpen] = useState(false)
   // 「点击改动文件 → 打开其 diff」：跨 App→SessionView→DiffPane 定位
   const [diffFocus, setDiffFocus] = useState<{ sessionId: string; path: string; key: number } | null>(null)
+  /** 回到此消息后：草稿回填 + 输入框聚焦信号（key 触发 Composer useEffect） */
+  const [draftFocus, setDraftFocus] = useState<{ sessionId: string; key: number } | null>(null)
   const panesRef = useRef(state.panes)
   panesRef.current = state.panes
 
@@ -35,8 +41,31 @@ export default function App() {
     savePrefs(prefs)
   }, [prefs])
 
-  // 事件订阅（信封 → reducer 按会话路由；'' = 应用级 notice → 聚焦会话）
-  useEffect(() => api.onEvent((payload) => dispatch({ kind: 'addressed', ...payload })), [])
+  // 事件订阅：信封先进队列，~30ms 合帧为一次 dispatch（eventsBatch 一次 reducer 折叠 + 一次重渲染）——
+  // 流式/工具期高频事件逐条 dispatch 是重渲染风暴的另一半根因；主进程 message_update 节流与此互补
+  const eventQueue = useRef<{ sessionId: string; event: AgentEvent }[]>([])
+  const flushTimer = useRef<number | null>(null)
+  const flushEvents = (): void => {
+    flushTimer.current = null
+    const items = eventQueue.current
+    if (items.length === 0) return
+    eventQueue.current = []
+    dispatch({ kind: 'eventsBatch', items })
+  }
+  useEffect(
+    () =>
+      api.onEvent((payload) => {
+        eventQueue.current.push(payload)
+        if (eventQueue.current.length > 64) {
+          // 积压过多立即冲刷：避免输出洪峰下渲染延迟无限叠加
+          if (flushTimer.current !== null) window.clearTimeout(flushTimer.current)
+          flushEvents()
+          return
+        }
+        if (flushTimer.current === null) flushTimer.current = window.setTimeout(flushEvents, 30)
+      }),
+    []
+  )
 
   // 目录快照注册（会话生效上下文窗口/成本计价的 EXTRA_CATALOG 数据源）；注册后触发重渲染
   const [, bumpCatalog] = useState(0)
@@ -91,11 +120,8 @@ export default function App() {
       const byProject = Object.fromEntries(entries)
       setSessionsByProject(byProject)
       const first = Object.values(byProject).flat()[0]
-      if (first) {
-        dispatch({ kind: 'openSession', sessionId: first.id, side: 'left' })
-        const r = await api.loadSession(first.id)
-        dispatch({ kind: 'hydrate', sessionId: first.id, result: r })
-      }
+      // 走统一的 openSession（内联版漏了焦点移交：每次启动后输入框无焦点，打字落空）
+      if (first) await openSession(first.id, 'left')
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -103,12 +129,14 @@ export default function App() {
   const focused = state.panes.focus === 'right' && state.panes.right ? state.panes.right : state.panes.left
   const focusBucket = state.sessions[focused] ?? initialSessionState
 
-  /** 打开会话：进 pane + hydrate 历史 */
+  /** 打开会话：进 pane + hydrate 历史；完成后把键盘焦点交给输入框——
+   *  否则焦点留在侧栏按钮上，用户新建/切换会话后直接打字全部落空（表现为"无法输入"） */
   const openSession = useCallback(
     async (id: string, side?: 'left' | 'right') => {
       dispatch({ kind: 'openSession', sessionId: id, side })
       const r = await api.loadSession(id)
       dispatch({ kind: 'hydrate', sessionId: id, result: r })
+      setDraftFocus({ sessionId: id, key: Date.now() })
     },
     [api]
   )
@@ -148,6 +176,8 @@ export default function App() {
 
   const handleCancel = async () => {
     if (!focused) return
+    // 挂起的审批弹窗先关（主进程 abort 会 deny 所有 pending），否则模态遮罩滞留挡住输入框
+    if (state.sessions[focused]?.permission) dispatch({ kind: 'closePermission', sessionId: focused })
     // pi 的 Escape 行为：取消时取回尚未消费的排队消息，回填输入框
     const drained = await api.cancel(focused)
     const texts = drained.filter((t) => t.trim().length > 0)
@@ -222,20 +252,35 @@ export default function App() {
     if (meta) dispatch({ kind: 'patchMeta', sessionId: sid, patch: { model: meta.model } })
   }
 
-  /** 回到消息：切换树叶子到该节点（丢弃后续），重放该会话 */
-  const handleRewind = async (sid: string, nodeId: string) => {
-    const r = await api.switchLeaf(sid, nodeId, false)
-    if (r === 'busy') return
+  /** 回到消息：改写重发语义——叶子切到该用户消息的父节点，重发即成为其兄弟节点（替换其在活动路径上的位置，
+   * 对齐 CC 的 rewind=edit）；根消息（无父）叶子置 null 清空视图，重发成为新的根。
+   * 输入框回填 = 被改写消息自身的文本（由调用方传入，截断后路径里它已不在场） */
+  const handleRewind = async (sid: string, nodeId: string, text?: string) => {
+    const tree = await api.listTree(sid).catch(() => null)
+    // 根消息/树查询失败的区分：parent=null → 置空叶子；树拿不到（undefined）→ 退回叶子=自身的旧行为
+    const parent = tree ? (tree.find((n) => n.id === nodeId)?.parentId ?? null) : undefined
+    const target = parent === undefined ? nodeId : parent
+    const r = await api.switchLeaf(sid, target, false)
+    if (r === 'busy') {
+      // 静默失败会让人以为功能坏了：运行中明确提示先停止
+      dispatch({ kind: 'addressed', sessionId: sid, event: { type: 'notice', message: '会话仍在运行中，无法回到此处改写；请先停止当前回合。' } })
+      return
+    }
     const res = await api.loadSession(sid)
     dispatch({ kind: 'hydrate', sessionId: sid, result: res })
+    if (!res.ok) return
+    if (text) {
+      dispatch({ kind: 'setDraft', sessionId: sid, text })
+      setDraftFocus({ sessionId: sid, key: Date.now() })
+    }
   }
 
-  /** 从消息分叉新会话并打开 */
+  /** 从消息分叉新会话并打开（读 panesRef：Transcript/TurnRow 的 memo 可能持有过期回调闭包） */
   const handleFork = async (sid: string, nodeId: string) => {
     const newId = await api.forkSession(sid, nodeId)
     if (!newId) return
     refreshSessions()
-    await openSession(newId, state.panes.focus)
+    await openSession(newId, panesRef.current.focus)
   }
 
   /** 导出为 HTML（可读快照） */
@@ -335,15 +380,16 @@ export default function App() {
         sessionId={sid}
         meta={state.metas[sid]}
         bucket={bucket}
-        layout={state.layouts[sid] ?? defaultPaneLayout()}
+        layout={state.layouts[sid] ?? DEFAULT_LAYOUT}
         maximized={state.maximized[sid] ?? null}
         draft={state.drafts[sid] ?? ''}
         fileTarget={state.fileTargets[sid] ?? null}
-        ptys={state.ptys[sid] ?? []}
+        ptys={state.ptys[sid] ?? EMPTY_PTYS}
         diffSummary={state.diffSummaries[sid] ?? null}
         viewMode={state.viewModes[sid] ?? 'normal'}
         config={config}
         diffFocus={diffFocus}
+        draftFocus={draftFocus}
         active={state.panes.focus === side}
         onSetDraft={(text) => dispatch({ kind: 'setDraft', sessionId: sid, text })}
         onSend={handleSend}
@@ -364,12 +410,11 @@ export default function App() {
           dispatch({ kind: 'patchMeta', sessionId: sid, patch: { permissionMode: mode } })
         }}
         onSetThinking={(l) => void handleSetThinking(l)}
-        onSetViewMode={(mode) => dispatch({ kind: 'setViewMode', sessionId: sid, mode })}
         onSetModel={(id) => void handleSetModel(sid, id)}
         onPtyCreated={(ptyId) => dispatch({ kind: 'setPty', sessionId: sid, ptyId })}
         onPtyClosed={(ptyId) => dispatch({ kind: 'removePty', sessionId: sid, ptyId })}
         onSetDiffSummary={(summary) => dispatch({ kind: 'setDiffSummary', sessionId: sid, summary })}
-        onRewind={(sessionId, nodeId) => void handleRewind(sessionId, nodeId)}
+        onRewind={handleRewind}
         onFork={(sessionId, nodeId) => void handleFork(sessionId, nodeId)}
         onCloseSessionPane={() => dispatch({ kind: 'closeSessionPane', side })}
         onSwitchProject={(path) => void handleSwitchSessionProject(sid, path)}

@@ -923,6 +923,10 @@ select {
 }
 .turn {
   margin-bottom: 20px;
+  /* 长会话轻量化：视口外的回合跳过布局/绘制（流式高频重排的 CPU 大头）；
+     contain-intrinsic-size 先给估算占位，渲染过后浏览器记用真实尺寸 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 200px;
 }
 /* 左右对话布局：用户气泡居右，AI 回复在左 */
 .user-row {
@@ -2410,10 +2414,15 @@ select {
   flex: 1;
   min-height: 0;
   position: relative;
+  /* 必须是列向 flex：host 的 flex:1 才能撑满并约束高度，cm-editor 的 height:100% 才有效，
+     CodeMirror 内部滚动条才会启用（否则 host 随内容无限增长，整个编辑区无法滚动） */
+  display: flex;
+  flex-direction: column;
 }
 .file-editor-host {
   flex: 1;
   min-height: 0;
+  overflow: hidden;
 }
 .file-editor-host .cm-editor {
   height: 100%;
@@ -2692,6 +2701,21 @@ select {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+/* 审批弹窗：低于设置弹层（两者同开时设置在上） */
+.permission-overlay {
+  z-index: 90;
+}
+.permission-modal {
+  width: 520px;
+  max-width: calc(100vw - 40px);
+  max-height: 70vh;
+  overflow-y: auto;
+  background: var(--overlay);
+  border: 1px solid var(--bd);
+  border-radius: 12px;
+  box-shadow: var(--shadow-modal);
+  padding: 16px 18px;
 }
 .settings {
   width: 540px;
@@ -4387,6 +4411,17 @@ select {
   align-items: center;
   gap: 8px;
   padding: 2px 4px 8px;
+}
+.pv-probe-search {
+  width: 100%;
+  margin: 0 0 8px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+/* 超长流式尾块的纯文本态（完成时一次性换 markdown+高亮） */
+.md-plain {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .pv-probe-title {
   font-size: 12px;

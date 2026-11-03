@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { CatalogModel } from '@shared/model-catalog'
 import type { ProviderProtocol } from '@shared/providers'
@@ -168,22 +168,31 @@ function inputToRaw(input: CustomProviderWriteInput): RawProvider {
   }
 }
 
-function readRawModelsJson(userDataPath: string): { providers?: Record<string, Record<string, unknown>> } & Record<string, unknown> {
+function readRawModelsJson(userDataPath: string): { raw: { providers?: Record<string, Record<string, unknown>> } & Record<string, unknown> } | { raw: null; error: string } {
   const file = join(userDataPath, 'models.json')
-  if (!existsSync(file)) return {}
+  if (!existsSync(file)) return { raw: {} }
   try {
-    return JSON.parse(readFileSync(file, 'utf-8')) as { providers?: Record<string, Record<string, unknown>> } & Record<string, unknown>
-  } catch {
-    return {}
+    return { raw: JSON.parse(readFileSync(file, 'utf-8')) as { providers?: Record<string, Record<string, unknown>> } & Record<string, unknown> }
+  } catch (err) {
+    // 解析失败绝不能吞：写路径若拿到空对象会把文件里全部既有 provider 抹掉
+    return { raw: null, error: `models.json 解析失败（${err instanceof Error ? err.message : String(err)}），为防数据丢失已中止写入；请修复该文件后重试` }
   }
 }
 
 function writeRawModelsJson(userDataPath: string, raw: object): { ok: true } | { ok: false; error: string } {
   const file = join(userDataPath, 'models.json')
+  // 原子写：先落临时文件再改名，中途被杀也不会留下半截 JSON 毁掉全部供应商配置
+  const tmp = `${file}.${Date.now()}.tmp`
   try {
-    writeFileSync(file, JSON.stringify(raw, null, 2) + '\n', 'utf-8')
+    writeFileSync(tmp, JSON.stringify(raw, null, 2) + '\n', 'utf-8')
+    renameSync(tmp, file)
     return { ok: true }
   } catch (err) {
+    try {
+      rmSync(tmp, { force: true })
+    } catch {
+      /* 清理失败忽略 */
+    }
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
 }
@@ -198,7 +207,9 @@ export function upsertModelsJson(userDataPath: string, input: CustomProviderWrit
   const models = (input.models ?? []).filter((m) => String(m?.id ?? '').trim().length > 0)
   if (models.length === 0) return { ok: false, error: '至少添加一个模型' }
 
-  const raw = readRawModelsJson(userDataPath)
+  const read = readRawModelsJson(userDataPath)
+  if (read.raw === null) return { ok: false, error: read.error }
+  const raw = read.raw
   const table = typeof raw.providers === 'object' && raw.providers !== null ? raw.providers : {}
   const existingIds = new Set(Object.keys(table))
   const id = input.id?.trim() || deriveProviderId(name, existingIds)
@@ -210,7 +221,9 @@ export function upsertModelsJson(userDataPath: string, input: CustomProviderWrit
 
 /** 删除一个自定义供应商；不存在也视为成功（幂等） */
 export function removeFromModelsJson(userDataPath: string, id: string): ModelsJsonWriteResult {
-  const raw = readRawModelsJson(userDataPath)
+  const read = readRawModelsJson(userDataPath)
+  if (read.raw === null) return { ok: false, error: read.error }
+  const raw = read.raw
   const table = typeof raw.providers === 'object' && raw.providers !== null ? raw.providers : {}
   if (!(id in table)) return { ok: true, id }
   delete table[id]

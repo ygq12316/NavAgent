@@ -445,9 +445,10 @@ export function registerIpc(deps: {
 
   ipcMain.handle('session:tree', (_e, id: string): SessionTreeNode[] => store.listTree(id))
 
-  // 切换活动叶子/派生会话：业务规则单点在 session-ops（与 ctx.sessions 扩展能力面同源）
-  ipcMain.handle('session:switchLeaf', (_e, id: string, nodeId: string, summarize: boolean) =>
-    ops.switchLeaf(String(id ?? ''), String(nodeId ?? ''), Boolean(summarize))
+  // 切换活动叶子/派生会话：业务规则单点在 session-ops（与 ctx.sessions 扩展能力面同源）；
+  // nodeId=null 合法（根消息改写重发：清空活动路径）
+  ipcMain.handle('session:switchLeaf', (_e, id: unknown, nodeId: unknown, summarize: unknown) =>
+    ops.switchLeaf(String(id ?? ''), nodeId === null ? null : String(nodeId ?? ''), Boolean(summarize))
   )
 
   ipcMain.handle('session:fork', (_e, id: string, nodeId: string) => ops.fork(String(id ?? ''), String(nodeId ?? '')))

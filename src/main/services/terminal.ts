@@ -1,5 +1,6 @@
 import * as pty from 'node-pty'
 import type { UiEvent } from '@shared/types'
+import { capOut } from '../tools/registry'
 import type { ToolResult } from '../tools/registry'
 
 export interface PtyCallbacks {
@@ -14,6 +15,12 @@ export class TerminalService {
   private terms = new Map<string, pty.IPty>()
   private buffers = new Map<string, string[]>()
   private bufferLens = new Map<string, number>()
+  /** 每终端输出尾窗（滚动 ~120 字符）：waitReady 提示符判定用，避免每 100ms 全量 join 环形缓冲 */
+  private tails = new Map<string, string>()
+  /** pty_data 合帧窗口（33ms ≈ 一帧）：高频输出逐 chunk 过 IPC 会放大成发送+渲染风暴 */
+  private static PTY_FRAME_MS = 33
+  private static TAIL_KEEP = 120
+  private pendingPty = new Map<string, { sessionId: string; text: string; timer: ReturnType<typeof setTimeout> }>()
   private sessionOf = new Map<string, string>()
   private sessionPtys = new Map<string, Set<string>>()
   private shells = new Map<string, 'powershell' | 'bash'>()
@@ -49,13 +56,15 @@ export class TerminalService {
       this.sessionPtys.get(sessionId)!.add(id)
       term.onData((chunk) => {
         this.pushBuffer(id, chunk)
-        this.emit({ type: 'pty_data', id, sessionId, chunk })
+        this.queuePtyData(id, sessionId, chunk)
         const taps = this.captureTaps.get(id)
         if (taps) for (const tap of taps) tap(chunk)
       })
       term.onExit(({ exitCode }) => {
         // 缓冲保留：pane 重开仍可回放最终输出；kill/killAll 时才清
+        this.flushPtyData(id)
         this.terms.delete(id)
+        this.tails.delete(id)
         this.captureTaps.delete(id)
         this.sessionPtys.get(sessionId)?.delete(id)
         this.emit({ type: 'pty_exit', id, sessionId, exitCode })
@@ -70,6 +79,7 @@ export class TerminalService {
   }
 
   private pushBuffer(id: string, chunk: string): void {
+    this.tails.set(id, ((this.tails.get(id) ?? '') + chunk).slice(-TerminalService.TAIL_KEEP))
     const buf = this.buffers.get(id)
     if (!buf) return
     buf.push(chunk)
@@ -86,6 +96,30 @@ export class TerminalService {
     }
     buf.splice(0, i)
     this.bufferLens.set(id, len - dropLen)
+  }
+
+  /** pty_data 合帧入队：同帧内的 chunk 拼接为一条事件（xterm 逐段 write 视觉等价，渲染路径零改动） */
+  private queuePtyData(id: string, sessionId: string, chunk: string): void {
+    const cur = this.pendingPty.get(id)
+    if (cur) {
+      cur.text += chunk
+      // 单帧超 256KB 立即冲刷：防超大输出的内存堆积与首字节延迟
+      if (cur.text.length > 262_144) this.flushPtyData(id)
+      return
+    }
+    this.pendingPty.set(id, {
+      sessionId,
+      text: chunk,
+      timer: setTimeout(() => this.flushPtyData(id), TerminalService.PTY_FRAME_MS)
+    })
+  }
+
+  private flushPtyData(id: string): void {
+    const cur = this.pendingPty.get(id)
+    if (!cur) return
+    this.pendingPty.delete(id)
+    clearTimeout(cur.timer)
+    this.emit({ type: 'pty_data', id, sessionId: cur.sessionId, chunk: cur.text })
   }
 
   /** 会话当前存活的 PTY id（第一个 = 主终端） */
@@ -116,14 +150,15 @@ export class TerminalService {
     return 'ok'
   }
 
-  /** 等待 shell 就绪：缓冲末尾出现提示符（PS …> / $ / #）——PSReadLine 初始化期写入会被吞掉 */
+  /** 等待 shell 就绪：输出尾窗出现提示符（PS …> / $ / #）——PSReadLine 初始化期写入会被吞掉。
+   *  判定读增量维护的尾窗（O(1)），不对环形缓冲做全量 join。 */
   private waitReady(id: string, signal: AbortSignal, timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs
     return new Promise((resolve) => {
       const poll = (): void => {
         if (signal.aborted || Date.now() > deadline) return resolve()
-        const buf = (this.buffers.get(id) ?? []).join('')
-        if (buf.length > 0 && /(>|#|\$)\s?$/.test(buf.slice(-60))) return resolve()
+        const tail = this.tails.get(id) ?? ''
+        if (tail.length > 0 && /(>|#|\$)\s?$/.test(tail.slice(-60))) return resolve()
         setTimeout(poll, 100)
       }
       poll()
@@ -146,15 +181,18 @@ export class TerminalService {
   }
 
   kill(id: string): void {
+    this.flushPtyData(id)
     this.terms.get(id)?.kill()
     this.terms.delete(id)
     this.buffers.delete(id)
     this.bufferLens.delete(id)
+    this.tails.delete(id)
     this.sessionPtys.get(this.sessionOf.get(id) ?? '')?.delete(id)
     this.sessionOf.delete(id)
   }
 
   killAll(): void {
+    for (const id of this.pendingPty.keys()) this.flushPtyData(id)
     for (const t of this.terms.values()) {
       try {
         t.kill()
@@ -165,6 +203,7 @@ export class TerminalService {
     this.terms.clear()
     this.buffers.clear()
     this.bufferLens.clear()
+    this.tails.clear()
     this.sessionPtys.clear()
     this.sessionOf.clear()
   }
@@ -174,7 +213,7 @@ export class TerminalService {
    *  捕获流直到出现展开后的标记（含退出码）。超时/中止发 Ctrl+C。永不 throw。
    *  opts.waitExit=false（interactive 长驻命令）：观察窗到点即返回"仍在运行"，
    *  不发 Ctrl+C——命令（dev server 等）在终端里继续跑，快命令仍会提前经标记返回。 */
-  async execInPty(id: string, command: string, timeoutMs: number, signal: AbortSignal, opts: { waitExit?: boolean } = {}): Promise<ToolResult> {
+  async execInPty(id: string, command: string, timeoutMs: number, signal: AbortSignal, opts: { waitExit?: boolean; onBackgroundExit?: (note: string) => void } = {}): Promise<ToolResult> {
     const waitExit = opts.waitExit !== false
     const term = this.terms.get(id)
     const shell = this.shells.get(id) ?? 'bash'
@@ -192,15 +231,19 @@ export class TerminalService {
         : `${oneLine}; echo "${MARK}_$?"`
     return new Promise((resolve) => {
       const captured: string[] = []
+      // 标记只出现在输出的结尾（命令完成行）；滚动尾窗匹配代替全量 join+strip——
+      // 逐 chunk 全文扫描是 O(n²)，大输出命令会把 main 进程卡死（全应用卡顿的根因）
+      let tail = ''
+      const TAIL_KEEP = 400
       let settled = false
       const tap = (chunk: string): void => {
         captured.push(chunk)
-        const text = captured.join('')
-        const m = new RegExp(`${MARK}_(\\d+)`).exec(stripAnsi(text))
+        tail = (tail + chunk).slice(-TAIL_KEEP)
+        const m = new RegExp(`${MARK}_(\\d+)`).exec(stripAnsi(tail))
         if (!m || settled) return
         settled = true
         cleanup()
-        resolve(this.shapeExecResult(text, MARK, Number(m[1]), '', command))
+        resolve(this.shapeExecResult(captured.join(''), MARK, Number(m[1]), '', command))
       }
       if (!this.captureTaps.has(id)) this.captureTaps.set(id, new Set())
       this.captureTaps.get(id)!.add(tap)
@@ -216,13 +259,31 @@ export class TerminalService {
         cleanup()
         resolve(this.shapeExecResult(captured.join(''), MARK, null, note, command))
       }
-      /** 长驻进程观察窗结束：不等待退出、不终止命令——已有输出交给模型，进程留在终端里继续跑 */
+      /** 长驻进程观察窗结束：不等待退出、不终止命令——已有输出交给模型，进程留在终端里继续跑。
+       *  若调用方给了 onBackgroundExit，装常驻 tap 继续监视标记行：命令退出后自动上报真实结果 */
       const finishLongRun = (): void => {
         if (settled) return
         settled = true
         cleanup()
         const shaped = this.shapeExecResult(captured.join(''), MARK, null, '', command)
         resolve({ content: `${shaped.content}\n（命令仍在终端中运行——长驻进程不等待结束；输出与停止请看终端面板）` })
+        if (opts.onBackgroundExit) {
+          const onBgExit = opts.onBackgroundExit
+          let bgSettled = false
+          let bgTail = ''
+          const bgTap = (chunk: string): void => {
+            if (bgSettled) return
+            captured.push(chunk)
+            bgTail = (bgTail + chunk).slice(-400)
+            const m2 = new RegExp(`${MARK}_(\\d+)`).exec(stripAnsi(bgTail))
+            if (!m2) return
+            bgSettled = true
+            this.captureTaps.get(id)?.delete(bgTap)
+            const shaped2 = this.shapeExecResult(captured.join(''), MARK, Number(m2[1]), '', command)
+            onBgExit(`后台命令已结束（退出码 ${m2[1]}）\n${shaped2.content}`)
+          }
+          this.captureTaps.get(id)!.add(bgTap)
+        }
       }
       const timer = setTimeout(() => {
         if (!waitExit) {
@@ -275,10 +336,4 @@ export class TerminalService {
 const ANSI_RE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g
 function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, '')
-}
-function capOut(buf: string): string {
-  const HEAD = 2000
-  const TAIL = 2000
-  if (buf.length <= HEAD + TAIL) return buf
-  return buf.slice(0, HEAD) + `\n…（中间省略 ${buf.length - HEAD - TAIL} 字符）\n` + buf.slice(-TAIL)
 }

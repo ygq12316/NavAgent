@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import type { ToolVM } from '../state/reducer'
 import { getApi } from '../api'
 import { DiffView } from './DiffView'
@@ -78,7 +78,9 @@ interface Props {
   onRunCommand?: (command: string) => void
 }
 
-export function ToolBlock({ tool, sessionId, defaultOpen = false, hidden = false, onOpenPath, onOpenTerminal, onRunCommand }: Props) {
+/** memo 按字段比较：流式 message_update 会为全部 ToolVM 重建对象（引用恒变），
+ *  未变化的工具行（历史绝大多数）靠字段相等跳过重渲染；回调 props 语义稳定（按 sid 闭包）故意忽略 */
+export const ToolBlock = memo(function ToolBlock({ tool, sessionId, defaultOpen = false, hidden = false, onOpenPath, onOpenTerminal, onRunCommand }: Props) {
   const [open, setOpen] = useState(defaultOpen)
   const [copied, setCopied] = useState(false)
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
@@ -98,6 +100,22 @@ export function ToolBlock({ tool, sessionId, defaultOpen = false, hidden = false
     }
   })()
   const Ident = TOOL_ICONS[tool.name] ?? IconWrench
+  // bash 原始命令：普通工具行也提供「在终端中运行」入口（终端重跑/长命令转终端）
+  const rawCommand = ((): string | null => {
+    if (tool.name !== 'bash') return null
+    try {
+      const a = JSON.parse(tool.args) as { command?: unknown }
+      return typeof a.command === 'string' && a.command ? a.command : null
+    } catch {
+      return null
+    }
+  })()
+  const runInTerminal = (e: React.MouseEvent): void => {
+    if (!rawCommand) return
+    e.stopPropagation()
+    onOpenTerminal?.()
+    onRunCommand?.(rawCommand)
+  }
 
   if (hidden) return null
 
@@ -223,7 +241,16 @@ export function ToolBlock({ tool, sessionId, defaultOpen = false, hidden = false
           </span>
         )}
       </button>
-      {pending && <div className="tool-hint mono">{STATUS_TEXT[tool.status]}</div>}
+      {pending && (
+        <div className="tool-hint mono">
+          {STATUS_TEXT[tool.status]}
+          {rawCommand && (
+            <button className="bash-act tool-term-run" title="在终端中运行此命令" onClick={runInTerminal}>
+              <IconPlay size={12} />
+            </button>
+          )}
+        </div>
+      )}
       {!pending && tool.updates.length > 0 && !tool.result && (
         <div className="tool-hint mono">{tool.updates[tool.updates.length - 1]}</div>
       )}
@@ -231,6 +258,11 @@ export function ToolBlock({ tool, sessionId, defaultOpen = false, hidden = false
         <div className={`tool-hint mono${tool.status === 'denied' || tool.status === 'error' ? ' hint-bad' : ''}`}>
           {preview}
           {truncated ? ' …' : ''}
+          {rawCommand && (
+            <button className="bash-act tool-term-run" title="在终端中运行此命令" onClick={runInTerminal}>
+              <IconPlay size={12} />
+            </button>
+          )}
         </div>
       )}
       {tool.result && open && (
@@ -284,4 +316,13 @@ export function ToolBlock({ tool, sessionId, defaultOpen = false, hidden = false
       )}
     </div>
   )
-}
+}, (a, b) =>
+  a.tool.name === b.tool.name &&
+  a.tool.args === b.tool.args &&
+  a.tool.status === b.tool.status &&
+  a.tool.result === b.tool.result &&
+  a.tool.updates === b.tool.updates &&
+  a.sessionId === b.sessionId &&
+  a.defaultOpen === b.defaultOpen &&
+  a.hidden === b.hidden
+)

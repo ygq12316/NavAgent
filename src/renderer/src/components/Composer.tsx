@@ -47,6 +47,8 @@ interface Props {
   model: string
   /** 全局默认模型（悬浮窗常驻「默认」选项） */
   defaultModel?: string
+  /** 选定的供应商 id（模型悬浮窗只显示该供应商的模型） */
+  providerId?: string
   /** 当前思考档位（config.modelParams.thinkingLevel；undefined = 默认档） */
   thinking: ThinkingLevel | undefined
   onSetThinking: (l: ThinkingLevel) => void
@@ -65,6 +67,8 @@ interface Props {
   /** 已注入上下文的文件（对话全程可见的 chip；移除走 main 注入表） */
   injectedFiles?: string[]
   onUninjectFile?: (rel: string) => void
+  /** 聚焦信号：key 变化时聚焦输入框并把光标移到末尾（回到消息回填草稿后） */
+  focusKey?: number
 }
 
 function fileToImageContent(file: File): Promise<ImageContent | null> {
@@ -100,14 +104,6 @@ const THINKING_OPTIONS: { value: ThinkingLevel | ''; label: string }[] = [
   { value: '', label: '思考 · 厂商默认' },
   ...(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const).map((l) => ({ value: l as ThinkingLevel | '', label: `思考 · ${l}` }))
 ]
-
-/** 权限模式常驻横条：四种模式同一风格，色调区分语义 */
-const MODE_STRIP: Record<PermissionMode, { label: string; tone: 'neutral' | 'ok' | 'warn' | 'bad'; icon: typeof IconLockSimple; tip: string }> = {
-  manual: { label: '审批模式', tone: 'neutral', icon: IconLockSimple, tip: '每次工具执行前请求批准' },
-  acceptEdits: { label: '自动编辑模式', tone: 'ok', icon: IconPencil, tip: '文件编辑自动放行，命令执行仍需批准' },
-  bypassPermissions: { label: '跳过审批模式', tone: 'bad', icon: IconLightning, tip: '所有工具自动放行，不再请求批准' },
-  plan: { label: '计划模式', tone: 'warn', icon: IconClipboardText, tip: '写类工具已移除，AI 将只读探索并给出完整实施方案' }
-}
 
 /** 信息条下拉（替代原生 select 的白色菜单）：点击 chip 原地弹出深色菜单；iconOnly=仅图案（色彩表达状态） */
 function ChipSelect({ icon: Icon, iconOnly, tone, value, options, onChange }: {
@@ -161,6 +157,15 @@ function ChipSelect({ icon: Icon, iconOnly, tone, value, options, onChange }: {
 export function Composer(p: Props) {
   const ref = useRef<HTMLTextAreaElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  // 回到此消息回填草稿后聚焦输入框（光标到末尾）
+  useEffect(() => {
+    if (p.focusKey) {
+      ref.current?.focus()
+      const len = ref.current?.value.length ?? 0
+      ref.current?.setSelectionRange(len, len)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p.focusKey])
   const [images, setImages] = useState<ImageContent[]>([])
   /** 非图片附件（上传到会话工作区） */
   const [atts, setAtts] = useState<Att[]>([])
@@ -346,17 +351,6 @@ export function Composer(p: Props) {
 
   return (
     <div className="composer">
-      {(() => {
-        const strip = MODE_STRIP[p.permissionMode]
-        if (!strip) return null
-        const SIcon = strip.icon
-        return (
-          <div className={`mode-strip tone-${strip.tone}`} title={strip.tip}>
-            <SIcon size={12} />
-            <span>{strip.label}</span>
-          </div>
-        )
-      })()}
       {images.length > 0 && (
         <div className="attachments">
           {images.map((im, i) => (
@@ -559,6 +553,7 @@ export function Composer(p: Props) {
             <ModelPopover
               model={p.model}
               defaultModel={p.defaultModel}
+              providerId={p.providerId}
               onPick={(id) => {
                 p.onSetModel(id)
                 setModelOpen(false)
